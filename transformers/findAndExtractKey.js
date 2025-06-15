@@ -1,80 +1,27 @@
 import t from "@babel/types";
 
 /*TODO: 
-  Optimise this plugin
+  further optimization is challenging with the current robust "collect-then-analyze" approach.
+  the current implementation handles two main key extraction patterns:
+  1. array.map(callback).join('')
+  2. concatenation of calls to simple string-returning functions (e.g., funcA() + funcB())
 */
 
 export const findAndExtractKeyPlugin = (api) => {
   return {
     visitor: {
       Program(programPath) {
-        const FIND_ALL_CANDIDATES = false; //? Set to false to stop at the first valid key
+        const FIND_ALL_CANDIDATES = false; //? set to false to stop at the first valid key
         console.time("Key Extraction Time");
 
         let potentialKeyArrays = {};
-        let potentialStringFunctions = {}; // To store functions like: funcName: { value: "string", nodePath }
+        let potentialStringFunctions = {};
         let foundKeys = [];
         let nonHexCandidates = [];
         let wrongLengthCandidates = [];
+        let callExpressionPathsToProcess = [];
 
-        const sourceCollectorVisitor = {
-          VariableDeclarator(path) {
-            const idPath = path.get("id");
-            const initPath = path.get("init");
-
-            if (idPath.isIdentifier()) {
-              // Collect Arrays
-              if (initPath.isArrayExpression()) {
-                const arrayName = idPath.node.name;
-                const elements = initPath.node.elements.map((el) => {
-                  if (t.isStringLiteral(el)) return el.value;
-                  if (t.isNumericLiteral(el)) return el.value;
-                  return null;
-                });
-                if (elements.every((el) => el !== null)) {
-                  potentialKeyArrays[arrayName] = elements;
-                }
-              }
-              // Collect String-Returning Functions
-              else if (
-                initPath.isFunctionExpression() ||
-                initPath.isArrowFunctionExpression()
-              ) {
-                collectFunctionIfStringReturning(idPath, initPath);
-              }
-            }
-          },
-          AssignmentExpression(path) {
-            const leftPath = path.get("left");
-            const rightPath = path.get("right");
-
-            if (leftPath.isIdentifier()) {
-              // Collect Arrays from Assignments
-              if (rightPath.isArrayExpression()) {
-                const arrayName = leftPath.node.name;
-                const elements = rightPath.node.elements.map((el) => {
-                  if (t.isStringLiteral(el)) return el.value;
-                  if (t.isNumericLiteral(el)) return el.value;
-                  return null;
-                });
-                if (elements.every((el) => el !== null)) {
-                  potentialKeyArrays[arrayName] = elements;
-                }
-              }
-              // Collect String-Returning Functions from Assignments
-              else if (
-                rightPath.isFunctionExpression() ||
-                rightPath.isArrowFunctionExpression()
-              ) {
-                collectFunctionIfStringReturning(leftPath, rightPath);
-              }
-            }
-          },
-          FunctionDeclaration(path) {
-            collectFunctionIfStringReturning(path.get("id"), path);
-          },
-        };
-
+        // helper: collect string-returning function
         function collectFunctionIfStringReturning(idPath, funcPath) {
           if (!idPath || !idPath.isIdentifier() || !funcPath) return;
           const funcName = idPath.node.name;
@@ -82,24 +29,24 @@ export const findAndExtractKeyPlugin = (api) => {
           let firstStringReturnArgumentPath = null;
 
           if (bodyPath.isStringLiteral()) {
-            // Handles concise arrow: () => "string"
+            // handles concise arrow: () => "string"
             firstStringReturnArgumentPath = bodyPath;
           } else if (bodyPath.isBlockStatement()) {
-            // Handles block body: () => { ... } or function() { ... }
+            // handles block body: () => { ... } or function() { ... }
             bodyPath.traverse({
               ReturnStatement(returnPath) {
                 if (firstStringReturnArgumentPath) {
-                  // Already found one, stop searching
+                  // already found one, stop searching
                   returnPath.stop();
                   return;
                 }
-                // Check if this ReturnStatement belongs to the funcPath function directly
+                // check if this ReturnStatement belongs to the funcPath function directly
                 // by comparing the function node this return statement is in, with the funcPath node.
                 if (returnPath.getFunctionParent().node === funcPath.node) {
                   const argumentPath = returnPath.get("argument");
                   if (argumentPath && argumentPath.isStringLiteral()) {
                     firstStringReturnArgumentPath = argumentPath;
-                    returnPath.stop(); // Stop after finding the first suitable return
+                    returnPath.stop(); // stop after finding the first suitable return
                   }
                 }
               },
@@ -109,14 +56,12 @@ export const findAndExtractKeyPlugin = (api) => {
           if (firstStringReturnArgumentPath) {
             potentialStringFunctions[funcName] = {
               value: firstStringReturnArgumentPath.node.value,
-              nodePath: funcPath, // path to the function node itself (e.g., ArrowFunctionExpression)
+              nodePath: funcPath, // path to the function node itself (e.g., arrowFunctionExpression)
             };
           }
         }
 
-        programPath.traverse(sourceCollectorVisitor);
-
-        // Helper function to resolve property names in MemberExpressions
+        // helper: resolve property name
         function getResolvedPropertyName(memberExprPath) {
           if (!memberExprPath.isMemberExpression()) {
             return null;
@@ -136,7 +81,7 @@ export const findAndExtractKeyPlugin = (api) => {
             }
             if (t.isIdentifier(propertyNode)) {
               const binding = propertyPath.scope.getBinding(propertyNode.name);
-              // Check if it's a constant variable initialized with a string
+              // check if it's a constant variable initialized with a string
               if (
                 binding &&
                 binding.constant &&
@@ -152,7 +97,7 @@ export const findAndExtractKeyPlugin = (api) => {
           return null;
         }
 
-        // Helper function to build a string from a BinaryExpression (+) chain
+        // helper: build string from binaryExpression
         function buildStringFromBinaryExpression(binaryExprPath) {
           const parts = [];
           let success = true;
@@ -173,15 +118,15 @@ export const findAndExtractKeyPlugin = (api) => {
                 ) {
                   parts.push(potentialStringFunctions[funcName].value);
                 } else {
-                  success = false; // Function not pre-collected or not returning a string
+                  success = false; // function not pre-collected or not returning a string
                 }
               } else {
-                success = false; // Callee is not a simple identifier
+                success = false; // callee is not a simple identifier
               }
             } else if (currentPath.isStringLiteral()) {
               parts.push(currentPath.node.value);
             } else {
-              success = false; // Unsupported node type in concatenation
+              success = false;
             }
           }
 
@@ -193,43 +138,44 @@ export const findAndExtractKeyPlugin = (api) => {
           return parts.join("");
         }
 
-        // Define the visitor for the second pass (finding map/join patterns and concatenations)
-        const keyFinderVisitor = {
-          CallExpression(path) {
-            // --- Try map().join("") pattern first ---
-            const calleePath = path.get("callee");
-            if (calleePath.isMemberExpression()) {
-              const joinName = getResolvedPropertyName(calleePath);
-              const isJoinCall =
-                joinName === "join" &&
-                (path.node.arguments.length === 0 ||
-                  (path.node.arguments.length === 1 &&
-                    t.isStringLiteral(path.node.arguments[0]) &&
-                    path.node.arguments[0].value === ""));
+        // helper: process callExpression for key
+        // this function encapsulates the logic from the original keyFinderVisitor.CallExpression
+        // returns true if processing should stop (e.g., key found and FIND_ALL_CANDIDATES is false)
+        function processCallExpressionForKey(path) {
+          const calleePath = path.get("callee");
+          // try map().join("") pattern
+          if (calleePath.isMemberExpression()) {
+            const joinName = getResolvedPropertyName(calleePath);
+            const isJoinCall =
+              joinName === "join" &&
+              (path.node.arguments.length === 0 ||
+                (path.node.arguments.length === 1 &&
+                  t.isStringLiteral(path.node.arguments[0]) &&
+                  path.node.arguments[0].value === ""));
 
-              if (isJoinCall) {
-                const joinObjectPath = calleePath.get("object");
-                if (joinObjectPath.isCallExpression()) {
-                  const mapCalleePath = joinObjectPath.get("callee");
-                  if (mapCalleePath.isMemberExpression()) {
-                    const mapName = getResolvedPropertyName(mapCalleePath);
-                    const mapArguments = joinObjectPath.get("arguments");
-                    const isMapCall =
-                      mapName === "map" &&
-                      mapArguments.length === 1 &&
-                      mapArguments[0].isArrowFunctionExpression();
+            if (isJoinCall) {
+              const joinObjectPath = calleePath.get("object");
+              if (joinObjectPath.isCallExpression()) {
+                const mapCalleePath = joinObjectPath.get("callee");
+                if (mapCalleePath.isMemberExpression()) {
+                  const mapName = getResolvedPropertyName(mapCalleePath);
+                  const mapArguments = joinObjectPath.get("arguments");
+                  const isMapCall =
+                    mapName === "map" &&
+                    mapArguments.length === 1 &&
+                    mapArguments[0].isArrowFunctionExpression();
 
-                    if (isMapCall) {
-                      const mapCallbackPath = mapArguments[0];
-                      const mapCallbackNode = mapCallbackPath.node;
-                      const mapArrayIdentifierPath =
-                        mapCalleePath.get("object");
+                  if (isMapCall) {
+                    const mapCallbackPath = mapArguments[0];
+                    const mapCallbackNode = mapCallbackPath.node;
+                    const mapArrayIdentifierPath = mapCalleePath.get("object");
 
-                      if (
-                        mapArrayIdentifierPath.isIdentifier() &&
-                        potentialKeyArrays[mapArrayIdentifierPath.node.name]
-                      ) {
-                        const indexArrayName = mapArrayIdentifierPath.node.name;
+                    if (mapArrayIdentifierPath.isIdentifier()) {
+                      const mapArrayObjectName =
+                        mapArrayIdentifierPath.node.name; // store .name
+                      if (potentialKeyArrays[mapArrayObjectName]) {
+                        // use stored name
+                        const indexArrayName = mapArrayObjectName; // use stored name
                         const indexArray = potentialKeyArrays[indexArrayName];
 
                         if (
@@ -282,7 +228,6 @@ export const findAndExtractKeyPlugin = (api) => {
                                 .map((index) => stringArray[index])
                                 .join("");
                               const isHex = /^[0-9a-fA-F]*$/.test(result);
-
                               if (result.length === 64) {
                                 if (isHex) {
                                   foundKeys.push({
@@ -293,7 +238,7 @@ export const findAndExtractKeyPlugin = (api) => {
                                     stringArray: [...stringArray],
                                     indexArray: [...indexArray],
                                   });
-                                  if (!FIND_ALL_CANDIDATES) path.stop();
+                                  if (!FIND_ALL_CANDIDATES) return true;
                                 } else {
                                   nonHexCandidates.push({
                                     result,
@@ -317,154 +262,207 @@ export const findAndExtractKeyPlugin = (api) => {
                                 e
                               );
                             }
-                            return; // Processed as map-join, exit
+                            // if map-join processed, even if not a key, we don't check for concatenation for this specific callExpression
+                            return false; // don't stop overall processing unless key found and !FIND_ALL_CANDIDATES
                           }
                         }
                       }
-                    }
-                  }
-                }
-              }
-            } // End of map-join check
-
-            // --- Try concatenation of function calls pattern ---
-            // path is the CallExpression, e.g., i()
-            if (path.node && calleePath.isIdentifier()) {
-              const funcName = calleePath.node.name; // e.g., "i"
-              const binding = path.scope.getBinding(funcName);
-              let functionNodePath = null;
-
-              if (binding) {
-                // Case 1: FunctionDeclaration (function i() { ... })
-                if (binding.path.isFunctionDeclaration()) {
-                  functionNodePath = binding.path;
-                }
-                // Case 2: VariableDeclarator with FunctionExpression/ArrowFunctionExpression
-                // (var i = function() { ... }; or var i = () => { ... };)
-                else if (binding.path.isVariableDeclarator()) {
-                  const initPath = binding.path.get("init");
-                  if (
-                    initPath && // Ensure initPath exists
-                    (initPath.isFunctionExpression() ||
-                      initPath.isArrowFunctionExpression())
-                  ) {
-                    functionNodePath = initPath;
-                  }
-                }
-
-                // Case 3: Variable declared (var i;), then assigned a function later (i = () => { ... };)
-                // We look at constantViolations which track assignments to variables declared without an init or with a different init.
-                if (!functionNodePath && binding.constantViolations) {
-                  // Iterate in reverse as the last assignment is likely the active one
-                  for (
-                    let i = binding.constantViolations.length - 1;
-                    i >= 0;
-                    i--
-                  ) {
-                    const violationPath = binding.constantViolations[i];
-                    // Check if the violation is an assignment to our funcName
-                    if (
-                      violationPath.isAssignmentExpression() &&
-                      violationPath.get("left").isIdentifier({ name: funcName })
-                    ) {
-                      const rightPath = violationPath.get("right");
-                      if (
-                        rightPath.isFunctionExpression() ||
-                        rightPath.isArrowFunctionExpression()
-                      ) {
-                        functionNodePath = rightPath; // Found function assigned
-                        break; // Use the last assignment found
-                      }
-                    }
-                  }
-                }
-              }
-
-              if (functionNodePath) {
-                // If we found the function definition for 'funcName'
-                const bodyPath = functionNodePath.get("body");
-                let returnedValuePath = null;
-
-                if (bodyPath.isExpression()) {
-                  // Concise arrow: () => expr
-                  returnedValuePath = bodyPath;
-                } else if (bodyPath.isBlockStatement()) {
-                  const returnStatements = [];
-                  // Traverse only the direct body of this function, not nested functions
-                  bodyPath.traverse({
-                    ReturnStatement(returnPath) {
-                      if (
-                        returnPath.getFunctionParent().node ===
-                        functionNodePath.node // Ensure it's a return for *this* function
-                      ) {
-                        returnStatements.push(returnPath);
-                      }
-                    },
-                  });
-                  if (returnStatements.length === 1) {
-                    // Expecting a single return for this pattern
-                    returnedValuePath = returnStatements[0].get("argument");
-                  }
-                }
-
-                if (
-                  returnedValuePath &&
-                  returnedValuePath.isBinaryExpression({ operator: "+" })
-                ) {
-                  const concatenatedString =
-                    buildStringFromBinaryExpression(returnedValuePath);
-                  if (concatenatedString !== null) {
-                    const isHex = /^[0-9a-fA-F]*$/.test(concatenatedString);
-                    if (concatenatedString.length === 64) {
-                      if (isHex) {
-                        // Extract component function names for logging
-                        const components = [];
-                        function getComponentFuncs(binPath) {
-                          if (binPath.isBinaryExpression({ operator: "+" })) {
-                            getComponentFuncs(binPath.get("left"));
-                            getComponentFuncs(binPath.get("right"));
-                          } else if (
-                            binPath.isCallExpression() &&
-                            binPath.get("callee").isIdentifier()
-                          ) {
-                            components.push(binPath.get("callee").node.name);
-                          } else if (binPath.isStringLiteral()) {
-                            components.push(`"${binPath.node.value}"`);
-                          }
-                        }
-                        getComponentFuncs(returnedValuePath);
-
-                        foundKeys.push({
-                          key: concatenatedString,
-                          type: "concatenation",
-                          viaFunction: funcName,
-                          components: components,
-                        });
-                        if (!FIND_ALL_CANDIDATES) path.stop();
-                      } else {
-                        nonHexCandidates.push({
-                          result: concatenatedString,
-                          type: "concatenation",
-                          viaFunction: funcName,
-                        });
-                      }
-                    } else {
-                      wrongLengthCandidates.push({
-                        result: concatenatedString,
-                        type: "concatenation",
-                        viaFunction: funcName,
-                        length: concatenatedString.length,
-                      });
                     }
                   }
                 }
               }
             }
+          }
+
+          // try concatenation of function calls pattern
+          if (path.node && calleePath.isIdentifier()) {
+            const funcName = calleePath.node.name;
+            const binding = path.scope.getBinding(funcName);
+            let functionNodePath = null;
+
+            if (binding) {
+              if (binding.path.isFunctionDeclaration()) {
+                functionNodePath = binding.path;
+              } else if (binding.path.isVariableDeclarator()) {
+                const initPath = binding.path.get("init");
+                if (
+                  initPath &&
+                  (initPath.isFunctionExpression() ||
+                    initPath.isArrowFunctionExpression())
+                ) {
+                  functionNodePath = initPath;
+                }
+              }
+              if (!functionNodePath && binding.constantViolations) {
+                for (
+                  let i = binding.constantViolations.length - 1;
+                  i >= 0;
+                  i--
+                ) {
+                  const violationPath = binding.constantViolations[i];
+                  if (
+                    violationPath.isAssignmentExpression() &&
+                    violationPath.get("left").isIdentifier({ name: funcName })
+                  ) {
+                    const rightPath = violationPath.get("right");
+                    if (
+                      rightPath.isFunctionExpression() ||
+                      rightPath.isArrowFunctionExpression()
+                    ) {
+                      functionNodePath = rightPath;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+
+            if (functionNodePath) {
+              const bodyPath = functionNodePath.get("body");
+              let returnedValuePath = null;
+              if (bodyPath.isExpression()) {
+                returnedValuePath = bodyPath;
+              } else if (bodyPath.isBlockStatement()) {
+                const returnStatements = [];
+                bodyPath.traverse({
+                  ReturnStatement(returnPath) {
+                    if (
+                      returnPath.getFunctionParent().node ===
+                      functionNodePath.node
+                    ) {
+                      returnStatements.push(returnPath);
+                    }
+                  },
+                });
+                if (returnStatements.length === 1) {
+                  returnedValuePath = returnStatements[0].get("argument");
+                }
+              }
+
+              if (
+                returnedValuePath &&
+                returnedValuePath.isBinaryExpression({ operator: "+" })
+              ) {
+                const concatenatedString =
+                  buildStringFromBinaryExpression(returnedValuePath);
+                if (concatenatedString !== null) {
+                  const isHex = /^[0-9a-fA-F]*$/.test(concatenatedString);
+                  if (concatenatedString.length === 64) {
+                    if (isHex) {
+                      const components = [];
+                      function getComponentFuncs(binPath) {
+                        if (binPath.isBinaryExpression({ operator: "+" })) {
+                          getComponentFuncs(binPath.get("left"));
+                          getComponentFuncs(binPath.get("right"));
+                        } else if (
+                          binPath.isCallExpression() &&
+                          binPath.get("callee").isIdentifier()
+                        ) {
+                          components.push(binPath.get("callee").node.name);
+                        } else if (binPath.isStringLiteral()) {
+                          components.push(`"${binPath.node.value}"`);
+                        }
+                      }
+                      getComponentFuncs(returnedValuePath);
+                      foundKeys.push({
+                        key: concatenatedString,
+                        type: "concatenation",
+                        viaFunction: funcName,
+                        components: components,
+                      });
+                      if (!FIND_ALL_CANDIDATES) return true;
+                    } else {
+                      nonHexCandidates.push({
+                        result: concatenatedString,
+                        type: "concatenation",
+                        viaFunction: funcName,
+                      });
+                    }
+                  } else {
+                    wrongLengthCandidates.push({
+                      result: concatenatedString,
+                      type: "concatenation",
+                      viaFunction: funcName,
+                      length: concatenatedString.length,
+                    });
+                  }
+                }
+              }
+            }
+          }
+          return false; // continue processing other callExpressions
+        }
+
+        // single traversal: collect sources and callExpression paths
+        programPath.traverse({
+          VariableDeclarator(path) {
+            const idPath = path.get("id");
+            const initPath = path.get("init");
+            if (idPath.isIdentifier()) {
+              // collect arrays
+              if (initPath.isArrayExpression()) {
+                const arrayName = idPath.node.name;
+                const elements = initPath.node.elements.map((el) => {
+                  if (t.isStringLiteral(el)) return el.value;
+                  if (t.isNumericLiteral(el)) return el.value;
+                  return null;
+                });
+                if (elements.every((el) => el !== null)) {
+                  potentialKeyArrays[arrayName] = elements;
+                }
+              }
+              // collect string-returning functions
+              else if (
+                initPath.isFunctionExpression() ||
+                initPath.isArrowFunctionExpression()
+              ) {
+                collectFunctionIfStringReturning(idPath, initPath);
+              }
+            }
           },
-        };
+          AssignmentExpression(path) {
+            const leftPath = path.get("left");
+            const rightPath = path.get("right");
+            if (leftPath.isIdentifier()) {
+              // collect arrays from assignments
+              if (rightPath.isArrayExpression()) {
+                const arrayName = leftPath.node.name;
+                const elements = rightPath.node.elements.map((el) => {
+                  if (t.isStringLiteral(el)) return el.value;
+                  if (t.isNumericLiteral(el)) return el.value;
+                  return null;
+                });
+                if (elements.every((el) => el !== null)) {
+                  potentialKeyArrays[arrayName] = elements;
+                }
+              }
+              // collect string-returning functions from assignments
+              else if (
+                rightPath.isFunctionExpression() ||
+                rightPath.isArrowFunctionExpression()
+              ) {
+                collectFunctionIfStringReturning(leftPath, rightPath);
+              }
+            }
+          },
+          FunctionDeclaration(path) {
+            collectFunctionIfStringReturning(path.get("id"), path);
+          },
+          CallExpression(path) {
+            callExpressionPathsToProcess.push(path);
+          },
+        });
 
-        programPath.traverse(keyFinderVisitor);
+        // second phase: process collected callExpressions
+        for (const path of callExpressionPathsToProcess) {
+          const shouldStop = processCallExpressionForKey(path);
+          if (shouldStop) {
+            // true if key found and !FIND_ALL_CANDIDATES
+            break;
+          }
+        }
 
+        // logging results
         if (foundKeys.length > 0) {
           if (FIND_ALL_CANDIDATES) {
             console.log(
@@ -524,7 +522,7 @@ export const findAndExtractKeyPlugin = (api) => {
             Object.keys(potentialStringFunctions).length
           }`
         );
-        // console.log("Potential String Functions:", potentialStringFunctions);
+        // console.log("potential String Functions:", potentialStringFunctions);
 
         if (nonHexCandidates.length > 0) {
           console.log(`
