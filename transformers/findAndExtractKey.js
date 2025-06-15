@@ -2,9 +2,10 @@ import t from "@babel/types";
 
 /*TODO: 
   further optimization is challenging with the current robust "collect-then-analyze" approach.
-  the current implementation handles two main key extraction patterns:
+  the current implementation handles three main key extraction patterns:
   1. array.map(callback).join('')
   2. concatenation of calls to simple string-returning functions (e.g., funcA() + funcB())
+  3. String.fromCharCode(...array.map(transformCallback)) (e.g., for XORed char codes)
 */
 
 export const findAndExtractKeyPlugin = (api) => {
@@ -16,6 +17,7 @@ export const findAndExtractKeyPlugin = (api) => {
 
         let potentialKeyArrays = {};
         let potentialStringFunctions = {};
+        let potentialTransformNumbers = {}; // for storing numbers like const N = 109;
         let foundKeys = [];
         let nonHexCandidates = [];
         let wrongLengthCandidates = [];
@@ -143,7 +145,8 @@ export const findAndExtractKeyPlugin = (api) => {
         // returns true if processing should stop (e.g., key found and FIND_ALL_CANDIDATES is false)
         function processCallExpressionForKey(path) {
           const calleePath = path.get("callee");
-          // try map().join("") pattern
+
+          // try map().join("") pattern first
           if (calleePath.isMemberExpression()) {
             const joinName = getResolvedPropertyName(calleePath);
             const isJoinCall =
@@ -172,10 +175,9 @@ export const findAndExtractKeyPlugin = (api) => {
 
                     if (mapArrayIdentifierPath.isIdentifier()) {
                       const mapArrayObjectName =
-                        mapArrayIdentifierPath.node.name; // store .name
+                        mapArrayIdentifierPath.node.name;
                       if (potentialKeyArrays[mapArrayObjectName]) {
-                        // use stored name
-                        const indexArrayName = mapArrayObjectName; // use stored name
+                        const indexArrayName = mapArrayObjectName;
                         const indexArray = potentialKeyArrays[indexArrayName];
 
                         if (
@@ -262,8 +264,312 @@ export const findAndExtractKeyPlugin = (api) => {
                                 e
                               );
                             }
-                            // if map-join processed, even if not a key, we don't check for concatenation for this specific callExpression
-                            return false; // don't stop overall processing unless key found and !FIND_ALL_CANDIDATES
+                            return false;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // try String.fromCharCode(...array.map(transformCallback)) pattern
+          if (calleePath.isMemberExpression()) {
+            const fromCharCodeMethodName = getResolvedPropertyName(calleePath);
+
+            if (
+              fromCharCodeMethodName === "fromCharCode" &&
+              path.node.arguments.length === 1
+            ) {
+              const spreadArgumentPath = path.get("arguments.0");
+              if (spreadArgumentPath.isSpreadElement()) {
+                const innerMapCallPath = spreadArgumentPath.get("argument");
+                if (innerMapCallPath.isCallExpression()) {
+                  const innerMapCalleePath = innerMapCallPath.get("callee");
+                  if (innerMapCalleePath.isMemberExpression()) {
+                    const innerMapMethodName =
+                      getResolvedPropertyName(innerMapCalleePath);
+                    const sourceArrayIdentifierPath =
+                      innerMapCalleePath.get("object");
+
+                    if (
+                      innerMapMethodName === "map" &&
+                      sourceArrayIdentifierPath.isIdentifier()
+                    ) {
+                      const sourceArrayName =
+                        sourceArrayIdentifierPath.node.name;
+                      const sourceNumberArray =
+                        potentialKeyArrays[sourceArrayName];
+
+                      if (
+                        sourceNumberArray &&
+                        sourceNumberArray.every((n) => typeof n === "number")
+                      ) {
+                        const mapCallbackPath =
+                          innerMapCallPath.get("arguments.0");
+                        if (
+                          mapCallbackPath &&
+                          (mapCallbackPath.isArrowFunctionExpression() ||
+                            mapCallbackPath.isFunctionExpression()) &&
+                          mapCallbackPath.node.params.length === 1 &&
+                          t.isIdentifier(mapCallbackPath.node.params[0])
+                        ) {
+                          const callbackParamName =
+                            mapCallbackPath.node.params[0].name;
+                          const callbackBodyPath = mapCallbackPath.get("body");
+
+                          // First try to find explicit binary operation
+                          let binaryReturnPath = null;
+
+                          if (callbackBodyPath.isBinaryExpression()) {
+                            // Concise arrow: (B) => B ^ N
+                            const leftOp = callbackBodyPath.get("left");
+                            const rightOp = callbackBodyPath.get("right");
+                            if (
+                              (leftOp.isIdentifier({
+                                name: callbackParamName,
+                              }) &&
+                                rightOp.isIdentifier() &&
+                                potentialTransformNumbers[rightOp.node.name] !==
+                                  undefined) ||
+                              (rightOp.isIdentifier({
+                                name: callbackParamName,
+                              }) &&
+                                leftOp.isIdentifier() &&
+                                potentialTransformNumbers[leftOp.node.name] !==
+                                  undefined)
+                            ) {
+                              binaryReturnPath = callbackBodyPath;
+                            }
+                          } else if (callbackBodyPath.isBlockStatement()) {
+                            callbackBodyPath.traverse({
+                              ReturnStatement(retPath) {
+                                if (binaryReturnPath) {
+                                  // Already found a suitable one
+                                  retPath.stop();
+                                  return;
+                                }
+                                if (
+                                  retPath.getFunctionParent().node ===
+                                  mapCallbackPath.node
+                                ) {
+                                  const argumentPath = retPath.get("argument");
+                                  if (
+                                    argumentPath &&
+                                    argumentPath.isBinaryExpression()
+                                  ) {
+                                    const leftOp = argumentPath.get("left");
+                                    const rightOp = argumentPath.get("right");
+                                    if (
+                                      (leftOp.isIdentifier({
+                                        name: callbackParamName,
+                                      }) &&
+                                        rightOp.isIdentifier() &&
+                                        potentialTransformNumbers[
+                                          rightOp.node.name
+                                        ] !== undefined) ||
+                                      (rightOp.isIdentifier({
+                                        name: callbackParamName,
+                                      }) &&
+                                        leftOp.isIdentifier() &&
+                                        potentialTransformNumbers[
+                                          leftOp.node.name
+                                        ] !== undefined)
+                                    ) {
+                                      binaryReturnPath = argumentPath;
+                                      retPath.stop();
+                                    }
+                                  }
+                                }
+                              },
+                            });
+                          }
+
+                          if (binaryReturnPath) {
+                            // Check if we found a suitable binary expression return
+                            const binaryExpr = binaryReturnPath.node;
+                            let elementOperandPath, transformVarOperandPath;
+
+                            // Determine which side is the callback parameter and which is the transform variable
+                            if (
+                              binaryReturnPath
+                                .get("left")
+                                .isIdentifier({ name: callbackParamName })
+                            ) {
+                              elementOperandPath = binaryReturnPath.get("left");
+                              transformVarOperandPath =
+                                binaryReturnPath.get("right");
+                            } else {
+                              // This assumes the right side is the callbackParamName based on previous checks
+                              elementOperandPath =
+                                binaryReturnPath.get("right");
+                              transformVarOperandPath =
+                                binaryReturnPath.get("left");
+                            }
+
+                            // Ensure transformVarOperandPath is an Identifier (already implicitly checked by potentialTransformNumbers lookup)
+                            // and elementOperandPath is also correctly identified.
+                            if (transformVarOperandPath.isIdentifier()) {
+                              const transformVarName =
+                                transformVarOperandPath.node.name;
+                              const transformValue =
+                                potentialTransformNumbers[transformVarName];
+
+                              if (typeof transformValue === "number") {
+                                const operator = binaryExpr.operator;
+                                try {
+                                  const transformedCharCodes =
+                                    sourceNumberArray.map((element) => {
+                                      switch (operator) {
+                                        case "^":
+                                          return element ^ transformValue;
+                                        case "-":
+                                          return element - transformValue;
+                                        case "+":
+                                          return element + transformValue;
+                                        case "*":
+                                          return element * transformValue;
+                                        case "/":
+                                          return element / transformValue;
+                                        // add other operators as needed
+                                        default:
+                                          throw new Error(
+                                            `unsupported operator: ${operator}`
+                                          );
+                                      }
+                                    });
+
+                                  const result = String.fromCharCode(
+                                    ...transformedCharCodes
+                                  );
+                                  const isHex = /^[0-9a-fA-F]*$/.test(result);
+
+                                  if (result.length === 64) {
+                                    if (isHex) {
+                                      foundKeys.push({
+                                        key: result,
+                                        type: "fromCharCode-map-transform",
+                                        sourceArrayName,
+                                        transformVarName,
+                                        transformValue,
+                                        operator,
+                                        sourceNumberArray: [
+                                          ...sourceNumberArray,
+                                        ],
+                                      });
+                                      if (!FIND_ALL_CANDIDATES) return true;
+                                    } else {
+                                      nonHexCandidates.push({
+                                        result,
+                                        type: "fromCharCode-map-transform",
+                                        sourceArrayName,
+                                        transformVarName,
+                                      });
+                                    }
+                                  } else {
+                                    wrongLengthCandidates.push({
+                                      result,
+                                      type: "fromCharCode-map-transform",
+                                      sourceArrayName,
+                                      transformVarName,
+                                      length: result.length,
+                                    });
+                                  }
+                                } catch (e) {
+                                  console.error(
+                                    "error during fromCharCode key derivation:",
+                                    e.message.includes("unsupported operator")
+                                      ? e.message
+                                      : e
+                                  );
+                                }
+                                return false; // processed this pattern
+                              }
+                            }
+                          }
+                          // NEW CODE: If we couldn't find an explicit binary operation, try a brute force approach
+                          else {
+                            // Since we couldn't determine the exact transformation from the callback,
+                            // we'll try the most common operations (XOR, addition, subtraction) with each transform number
+                            console.log(
+                              `Trying brute force approach for String.fromCharCode pattern with array '${sourceArrayName}'`
+                            );
+
+                            const operators = ["^", "+", "-"]; // Common operations to try
+                            const transformNumbers = Object.entries(
+                              potentialTransformNumbers
+                            );
+
+                            // Sort by occurrence in the source to prioritize likely transform constants
+                            transformNumbers.sort((a, b) => {
+                              // Place small values like 109, 32, 64, etc. first as they're commonly used
+                              if (
+                                a[1] > 0 &&
+                                a[1] < 256 &&
+                                !(b[1] > 0 && b[1] < 256)
+                              )
+                                return -1;
+                              if (
+                                b[1] > 0 &&
+                                b[1] < 256 &&
+                                !(a[1] > 0 && a[1] < 256)
+                              )
+                                return 1;
+                              return 0;
+                            });
+
+                            // Try combinations of operators and transform values
+                            for (const operator of operators) {
+                              for (const [
+                                transformVarName,
+                                transformValue,
+                              ] of transformNumbers) {
+                                try {
+                                  const transformedCharCodes =
+                                    sourceNumberArray.map((element) => {
+                                      switch (operator) {
+                                        case "^":
+                                          return element ^ transformValue;
+                                        case "+":
+                                          return element + transformValue;
+                                        case "-":
+                                          return element - transformValue;
+                                        default:
+                                          throw new Error(
+                                            `Unsupported operator in brute force: ${operator}`
+                                          );
+                                      }
+                                    });
+
+                                  const result = String.fromCharCode(
+                                    ...transformedCharCodes
+                                  );
+                                  const isHex = /^[0-9a-fA-F]*$/.test(result);
+
+                                  if (result.length === 64 && isHex) {
+                                    console.log(
+                                      `Found valid key using brute force: ${transformVarName} ${operator} with value ${transformValue}`
+                                    );
+                                    foundKeys.push({
+                                      key: result,
+                                      type: "fromCharCode-brute-force",
+                                      sourceArrayName,
+                                      transformVarName,
+                                      transformValue,
+                                      operator,
+                                      sourceNumberArray: [...sourceNumberArray],
+                                    });
+                                    if (!FIND_ALL_CANDIDATES) return true;
+                                    // Don't break after finding one - continue to find all if FIND_ALL_CANDIDATES is true
+                                  }
+                                } catch (e) {
+                                  // Silently fail and continue with next combination
+                                }
+                              }
+                            }
+                            return false; // Processed this pattern with brute force approach
                           }
                         }
                       }
@@ -418,6 +724,11 @@ export const findAndExtractKeyPlugin = (api) => {
               ) {
                 collectFunctionIfStringReturning(idPath, initPath);
               }
+              // collect numeric constants
+              else if (initPath.isNumericLiteral()) {
+                potentialTransformNumbers[idPath.node.name] =
+                  initPath.node.value;
+              }
             }
           },
           AssignmentExpression(path) {
@@ -442,6 +753,11 @@ export const findAndExtractKeyPlugin = (api) => {
                 rightPath.isArrowFunctionExpression()
               ) {
                 collectFunctionIfStringReturning(leftPath, rightPath);
+              }
+              // collect numeric constants from assignments
+              else if (rightPath.isNumericLiteral()) {
+                potentialTransformNumbers[leftPath.node.name] =
+                  rightPath.node.value;
               }
             }
           },
@@ -485,6 +801,17 @@ export const findAndExtractKeyPlugin = (api) => {
               } else if (item.type === "concatenation") {
                 console.log("Constructed via function:", item.viaFunction);
                 console.log("Components:", item.components.join(" + "));
+              } else if (item.type === "fromCharCode-map-transform") {
+                console.log("Source Array Name:", item.sourceArrayName);
+                // console.log("Source Array Content:", JSON.stringify(item.sourceNumberArray));
+                console.log(
+                  `Transformation: element ${item.operator} ${item.transformVarName} (${item.transformValue})`
+                );
+              } else if (item.type === "fromCharCode-brute-force") {
+                console.log("Source Array Name:", item.sourceArrayName);
+                console.log(
+                  `Transformation: element ${item.operator} ${item.transformVarName} (${item.transformValue}) [brute-forced]`
+                );
               }
             });
           } else {
@@ -505,6 +832,17 @@ export const findAndExtractKeyPlugin = (api) => {
             } else if (item.type === "concatenation") {
               console.log("Constructed via function:", item.viaFunction);
               console.log("Components:", item.components.join(" + "));
+            } else if (item.type === "fromCharCode-map-transform") {
+              console.log("Source Array Name:", item.sourceArrayName);
+              // console.log("Source Array Content:", JSON.stringify(item.sourceNumberArray));
+              console.log(
+                `Transformation: element ${item.operator} ${item.transformVarName} (${item.transformValue})`
+              );
+            } else if (item.type === "fromCharCode-brute-force") {
+              console.log("Source Array Name:", item.sourceArrayName);
+              console.log(
+                `Transformation: element ${item.operator} ${item.transformVarName} (${item.transformValue}) [brute-forced]`
+              );
             }
           }
         } else {
@@ -522,7 +860,13 @@ export const findAndExtractKeyPlugin = (api) => {
             Object.keys(potentialStringFunctions).length
           }`
         );
+        console.log(
+          `Total potential transform numbers identified: ${
+            Object.keys(potentialTransformNumbers).length
+          }`
+        );
         // console.log("potential String Functions:", potentialStringFunctions);
+        // console.log("potential Transform Numbers:", potentialTransformNumbers);
 
         if (nonHexCandidates.length > 0) {
           console.log(`
