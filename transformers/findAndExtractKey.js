@@ -489,7 +489,7 @@ export const findAndExtractKeyPlugin = (api) => {
                               }
                             }
                           }
-                          // NEW CODE: If we couldn't find an explicit binary operation, try a brute force approach
+                          // If we couldn't find an explicit binary operation, try a brute force approach
                           else {
                             // Since we couldn't determine the exact transformation from the callback,
                             // we'll try the most common operations (XOR, addition, subtraction) with each transform number
@@ -569,7 +569,7 @@ export const findAndExtractKeyPlugin = (api) => {
                                 }
                               }
                             }
-                            return false; // Processed this pattern with brute force approach
+                            return false; 
                           }
                         }
                       }
