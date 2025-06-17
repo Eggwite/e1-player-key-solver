@@ -1,0 +1,413 @@
+import { debugLoggers } from "../config/debug.js";
+import { validateConcatenatedKey } from "../validators/keyValidator.js";
+
+/**
+ * Handles the extraction of concatenated keys from function calls
+ */
+export class ConcatenatedKeyExtractor {
+  constructor(segmentFunctionsMap) {
+    this.segmentFunctionsMap = segmentFunctionsMap;
+    this.debug = debugLoggers.assemblerLogic;
+  }
+
+  setTypes(t) {
+    this.t = t;
+  }
+
+  setObjectPropertiesMap(objectPropertiesMap) {
+    this.objectPropertiesMap = objectPropertiesMap;
+  }
+
+  // New method to set the alias map
+  setAliasMap(aliasMap) {
+    this.aliasMap = aliasMap;
+  }
+
+  // New helper to find string literal return, checking inside IfStatements
+  _findStringReturnInBlock(blockNode) {
+    const t = this.t;
+    if (!blockNode || !t.isBlockStatement(blockNode)) {
+      return null;
+    }
+    for (const stmt of blockNode.body) {
+      if (t.isReturnStatement(stmt) && t.isStringLiteral(stmt.argument)) {
+        this.debug.log(`_findStringReturnInBlock: Found direct return: ${stmt.argument.value}`);
+        return stmt.argument.value;
+      }
+      if (t.isIfStatement(stmt)) {
+        this.debug.log("_findStringReturnInBlock: Checking IfStatement consequent.");
+        let returned = this._findStringReturnInBlock(stmt.consequent);
+        if (returned) return returned;
+        if (stmt.alternate) {
+          this.debug.log("_findStringReturnInBlock: Checking IfStatement alternate.");
+          returned = this._findStringReturnInBlock(stmt.alternate);
+          if (returned) return returned;
+        }
+      }
+    }
+    return null;
+  }
+
+  // New helper to resolve object names using the alias map
+  resolveObjectName(name) {
+    if (this.aliasMap && this.aliasMap[name]) {
+      this.debug.log(`Resolved alias '${name}' to '${this.aliasMap[name]}'`);
+      return this.aliasMap[name];
+    }
+    return name;
+  }
+
+  /**
+   * Derives and validates keys from concatenated function calls
+   * @param {Object} returnArgumentNode - The AST node to analyze
+   * @param {string} assemblerFuncName - Name of the assembler function
+   * @returns {Object|null} Validation result
+   */
+  deriveAndValidate(returnArgumentNode, assemblerFuncName) {
+    const t = this.t;
+
+    this.debug.log(
+      `ENTER deriveAndValidate for ${assemblerFuncName}. Arg type: ${
+        returnArgumentNode ? returnArgumentNode.type : "N/A"
+      }${
+        returnArgumentNode && returnArgumentNode.type === "BinaryExpression"
+          ? `, Operator: '${returnArgumentNode.operator}'`
+          : ""
+      }`
+    );
+
+    let concatenatedString = "";
+    let isProcessed = false;
+    let involvedSegmentFuncs = [];
+
+    // Handle binary expressions (+ or | operators)
+    if (
+      returnArgumentNode &&
+      t.isBinaryExpression(returnArgumentNode) &&
+      (returnArgumentNode.operator === "+" ||
+        returnArgumentNode.operator === "|")
+    ) {
+      isProcessed = true;
+      this.debug.log(
+        `${assemblerFuncName}: Arg IS BinaryExpression with '${returnArgumentNode.operator}' operator. Processing...`
+      );
+
+      const stringParts = this.flattenConcatenation(
+        returnArgumentNode,
+        assemblerFuncName,
+        t
+      );
+      if (stringParts.some((p) => p === undefined || p === null)) {
+        this.debug.log(
+          `${assemblerFuncName} (BinaryExpr '${
+            returnArgumentNode.operator
+          }'): flattenConcatenation returned parts with undefined/null: ${JSON.stringify(
+            stringParts
+          )}`
+        );
+        concatenatedString = null;
+      } else {
+        concatenatedString = stringParts.join("");
+        involvedSegmentFuncs = this.getInvolvedSegments(stringParts);
+        this.debug.log(
+          `${assemblerFuncName} (BinaryExpr '${returnArgumentNode.operator}'): successfully joined parts: '${concatenatedString}'`
+        );
+      }
+    }
+    // Handle call expressions
+    else if (returnArgumentNode && t.isCallExpression(returnArgumentNode)) {
+      isProcessed = true;
+      this.debug.log(
+        `${assemblerFuncName}: Arg IS CallExpression. Callee type: ${
+          returnArgumentNode.callee ? returnArgumentNode.callee.type : "N/A"
+        }. Processing...`
+      );
+
+      const result = this.getStringFromNode(
+        returnArgumentNode,
+        assemblerFuncName,
+        t
+      );
+      concatenatedString = result.value;
+      involvedSegmentFuncs = result.segments;
+
+      if (concatenatedString === null) {
+        this.debug.log(
+          `${assemblerFuncName} (CallExpr): getStringFromNode returned null.`
+        );
+      }
+    } else {
+      this.debug.log(
+        `${assemblerFuncName}: Arg is NOT BinaryExpr(+|) or CallExpr. Actual type: ${
+          returnArgumentNode ? returnArgumentNode.type : "N/A"
+        }${
+          returnArgumentNode && returnArgumentNode.type === "BinaryExpression"
+            ? `, Operator: '${returnArgumentNode.operator}'`
+            : ""
+        }. Skipping processing.`
+      );
+    }
+
+    this.debug.log(
+      `PRE-VALIDATION ${assemblerFuncName}: isProcessed=${isProcessed}, derivedString='${concatenatedString}', involvedSegments: ${involvedSegmentFuncs.join(
+        ", "
+      )}`
+    );
+
+    if (!isProcessed || concatenatedString === null) {
+      this.debug.log(
+        `EXIT ${assemblerFuncName}: ${
+          !isProcessed
+            ? "Not processed"
+            : "Processed, but concatenatedString is null"
+        }. Returning null.`
+      );
+      return null;
+    }
+
+    const result = validateConcatenatedKey(
+      concatenatedString,
+      assemblerFuncName,
+      involvedSegmentFuncs
+    );
+
+    this.debug.log(
+      `EXIT ${assemblerFuncName}: Validating derived key. Key='${concatenatedString}', Length=${
+        concatenatedString.length
+      } (expected 64), IsHex=${/^[0-9a-fA-F]*$/.test(concatenatedString)}`
+    );
+
+    return result;
+  }
+
+  /**
+   * Enhanced: Track object property assignments for use in key extraction
+   * Call this from the main plugin to register object property assignments.
+   */
+  setObjectPropertiesMap(objectPropertiesMap) {
+    this.objectPropertiesMap = objectPropertiesMap;
+  }
+
+  /**
+   * Extracts string value from a single node
+   * @param {Object} node - AST node
+   * @param {string} assemblerFuncName - Name of assembler function for debug
+   * @param {Object} t - Babel types
+   * @returns {Object} {value: string|null, segments: Array}
+   */
+  getStringFromNode(node, assemblerFuncName, t) {
+    t = t || this.t;
+    this.debug.log(
+      `getStringFromNode for ${assemblerFuncName}: Input node type: ${
+        node ? node.type : "N/A"
+      }`
+    );
+
+    // New: Handle direct MemberExpression (e.g., S["a"])
+    if (
+      t.isMemberExpression(node) &&
+      !t.isCallExpression(
+        node.parentPath?.node
+      ) /* Check parent to avoid double processing if it's a callee */
+    ) {
+      if (
+        t.isIdentifier(node.object) &&
+        (t.isStringLiteral(node.property) || t.isIdentifier(node.property))
+      ) {
+        const rawObjName = node.object.name;
+        const objName = this.resolveObjectName(rawObjName); // Use alias resolver
+        const propName = t.isStringLiteral(node.property)
+          ? node.property.value
+          : node.property.name;
+
+        if (
+          this.objectPropertiesMap &&
+          this.objectPropertiesMap[objName] &&
+          this.objectPropertiesMap[objName][propName]
+        ) {
+          const propValueNode = this.objectPropertiesMap[objName][propName];
+          if (t.isStringLiteral(propValueNode)) {
+            this.debug.log(
+              `getStringFromNode for ${assemblerFuncName}: Resolved MemberExpression '${rawObjName}["${propName}"]' to string literal '${propValueNode.value}'`
+            );
+            return {
+              value: propValueNode.value,
+              segments: [`${objName}.${propName}`],
+            };
+          }
+        }
+      }
+    }
+
+    // Handle function property call: S["b"]()
+    if (
+      t.isCallExpression(node) &&
+      t.isMemberExpression(node.callee) &&
+      t.isIdentifier(node.callee.object) && // Ensure object is an Identifier
+      (t.isStringLiteral(node.callee.property) || t.isIdentifier(node.callee.property))
+    ) {
+      const rawObjName = node.callee.object.name;
+      const objName = this.resolveObjectName(rawObjName); // Use alias resolver
+      const propName = t.isStringLiteral(node.callee.property) ? node.callee.property.value : node.callee.property.name;
+
+      if (
+        this.objectPropertiesMap &&
+        this.objectPropertiesMap[objName] &&
+        this.objectPropertiesMap[objName][propName]
+      ) {
+        const funcNode = this.objectPropertiesMap[objName][propName];
+        if (t.isFunctionExpression(funcNode) || t.isArrowFunctionExpression(funcNode)) {
+          let returnValue = null;
+          
+          if (t.isBlockStatement(funcNode.body)) {
+            // Use the new helper to find return value
+            returnValue = this._findStringReturnInBlock(funcNode.body);
+          } else if (t.isStringLiteral(funcNode.body)) { // Arrow function with implicit return
+            returnValue = funcNode.body.value;
+            this.debug.log(
+              `getStringFromNode for ${assemblerFuncName}: Arrow function property '${rawObjName}["${propName}"]()' implicitly returned '${returnValue}'`
+            );
+          }
+
+          if (returnValue !== null) {
+            this.debug.log(
+              `getStringFromNode for ${assemblerFuncName}: Resolved function property call '${rawObjName}["${propName}"]()' to '${returnValue}'`
+            );
+            return { value: returnValue, segments: [`${objName}.${propName}()`] };
+          } else {
+            this.debug.log(
+              `getStringFromNode for ${assemblerFuncName}: Function property call '${rawObjName}["${propName}"]()' did not resolve to a string literal (checked if-statements). Body type: ${funcNode.body.type}`
+            );
+          }
+        }
+      }
+    }
+
+    // Original logic for direct segment function calls (e.g., funcName())
+    if (
+      t.isCallExpression(node) &&
+      t.isIdentifier(node.callee) &&
+      this.segmentFunctionsMap[node.callee.name]
+    ) {
+      const segmentName = node.callee.name;
+      const segmentValue = this.segmentFunctionsMap[segmentName];
+      this.debug.log(
+        `getStringFromNode for ${assemblerFuncName}: Resolved segment '${segmentName}' to '${segmentValue}'`
+      );
+      return { value: segmentValue, segments: [segmentName] };
+    }
+
+    // Debug various failure cases
+    if (t.isCallExpression(node) && t.isIdentifier(node.callee)) {
+      this.debug.log(
+        `getStringFromNode for ${assemblerFuncName}: Segment Call '${
+          node.callee.name
+        }' NOT FOUND in segmentFunctionsMap. Keys: ${Object.keys(
+          this.segmentFunctionsMap
+        ).join(", ")}`
+      );
+    } else if (t.isCallExpression(node) && !t.isIdentifier(node.callee)) {
+      this.debug.log(
+        `getStringFromNode for ${assemblerFuncName}: CallExpression callee is not Identifier. Type: ${
+          node.callee ? node.callee.type : "N/A"
+        }`
+      );
+    } else if (node && node.type !== "CallExpression") {
+      this.debug.log(
+        `getStringFromNode for ${assemblerFuncName}: Node is not a CallExpression. Type: ${node.type}`
+      );
+    } else {
+      this.debug.log(
+        `getStringFromNode for ${assemblerFuncName}: Node is not a resolvable CallExpression or other issue.`
+      );
+    }
+
+    return { value: null, segments: [] };
+  }
+
+  /**
+   * Flattens a binary expression tree into an array of string parts
+   * @param {Object} node - Binary expression node
+   * @param {string} assemblerFuncName - Name of assembler function for debug
+   * @param {Object} t - Babel types
+   * @returns {Array} Array of string parts
+   */
+  flattenConcatenation(node, assemblerFuncName, t) {
+    t = t || this.t;
+    let parts = [];
+    let allSegments = [];
+
+    const traverse = (currentNode, depth = 0) => {
+      this.debug.log(
+        `${"  ".repeat(
+          depth
+        )}flattenConcatenation.traverse for ${assemblerFuncName}: Node type: ${
+          currentNode ? currentNode.type : "N/A"
+        }`
+      );
+
+      // Allow both '+' and '|' as operators for recursion
+      if (
+        t.isBinaryExpression(currentNode) &&
+        (currentNode.operator === "+" || currentNode.operator === "|")
+      ) {
+        this.debug.log(
+          `${"  ".repeat(
+            depth
+          )}flattenConcatenation.traverse for ${assemblerFuncName}: BinaryExpr (${
+            currentNode.operator
+          }). Traversing left then right.`
+        );
+        traverse(currentNode.left, depth + 1);
+        traverse(currentNode.right, depth + 1);
+      } else {
+        this.debug.log(
+          `${"  ".repeat(
+            depth
+          )}flattenConcatenation.traverse for ${assemblerFuncName}: Leaf node. Attempting getStringFromNode.`
+        );
+        const result = this.getStringFromNode(
+          currentNode,
+          assemblerFuncName,
+          t
+        );
+        if (result.value === null) {
+          this.debug.log(
+            `${"  ".repeat(
+              depth
+            )}flattenConcatenation.traverse for ${assemblerFuncName}: getStringFromNode returned null for a part (type: ${
+              currentNode ? currentNode.type : "N/A"
+            }).`
+          );
+        }
+        parts.push(result.value);
+        allSegments.push(...result.segments);
+      }
+    };
+
+    this.debug.log(
+      `flattenConcatenation for ${assemblerFuncName}: Initial node type: ${
+        node ? node.type : "N/A"
+      }`
+    );
+    traverse(node);
+    this.debug.log(
+      `flattenConcatenation for ${assemblerFuncName}: Resulting parts: ${JSON.stringify(
+        parts
+      )}`
+    );
+
+    // Store segments for later use
+    this.lastSegments = allSegments;
+    return parts;
+  }
+
+  /**
+   * Extracts involved segments from the flattened parts
+   * @param {Array} parts - Array of string parts
+   * @returns {Array} Array of segment function names
+   */
+  getInvolvedSegments(parts) {
+    return this.lastSegments || [];
+  }
+}
