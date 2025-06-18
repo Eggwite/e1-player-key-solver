@@ -1,3 +1,6 @@
+//! This is the old version of the key extraction plugin.
+//! It is kept for reference and should not be used in new projects.
+
 /*TODO: 
   Optimise this plugin to use a single pass, 
   for now I'm not confident if this is consistent 

@@ -1,5 +1,6 @@
 import * as t from "@babel/types";
 import generate from "@babel/generator";
+import { debug } from "./centralDebug.js";
 
 const gen = (node) => {
   return generate.default(node, { compact: true }).code;
@@ -77,7 +78,7 @@ export const solveStateMachine = {
 
     AssignmentExpression(path, state) {
       if (state.stateMachineInfo) return;
-      console.log(
+      debug.log(
         `[STATE-MACHINE] Checking AssignmentExpression: ${gen(
           path.node.left
         )} = ...`
@@ -112,7 +113,7 @@ export const solveStateMachine = {
         return;
       }
 
-      console.log(
+      debug.log(
         `  -> [PASS] Found potential SM pattern with state var '${stateVarName}'`
       );
 
@@ -133,7 +134,7 @@ export const solveStateMachine = {
           : null;
         if (!propName) continue;
 
-        console.log(`    -> Analyzing property: '${propName}'`);
+        debug.log(`    -> Analyzing property: '${propName}'`);
         const propBody = propValue.get("body.body");
 
         const assignmentStmt = propBody.find(
@@ -144,7 +145,7 @@ export const solveStateMachine = {
         );
         if (propValue.get("params").length === 1 && assignmentStmt) {
           setterName = propName;
-          console.log(`      -> Identified as SETTER.`);
+          debug.log(`      -> Identified as SETTER.`);
         }
 
         const switchStmt = propBody.find((n) => n.isSwitchStatement());
@@ -153,7 +154,7 @@ export const solveStateMachine = {
           switchStmt.get("discriminant").isIdentifier({ name: stateVarName })
         ) {
           calculatorName = propName;
-          console.log(`      -> Identified as CALCULATOR. Parsing cases...`);
+          debug.log(`      -> Identified as CALCULATOR. Parsing cases...`);
           for (const switchCase of switchStmt.get("cases")) {
             const assignment = switchCase
               .get("consequent")
@@ -165,7 +166,7 @@ export const solveStateMachine = {
             if (assignment && switchCase.get("test").isNumericLiteral()) {
               const caseValue = switchCase.node.test.value;
               logicMap.set(caseValue, assignment.get("expression.right").node);
-              console.log(`        -> Stored logic for case ${caseValue}.`);
+              debug.log(`        -> Stored logic for case ${caseValue}.`);
             }
           }
         }
@@ -178,14 +179,14 @@ export const solveStateMachine = {
           calculatorName,
           logicMap,
         };
-        console.log(`\n[STATE-MACHINE] State Machine fully parsed!`);
-        console.log(`   - Object Name: '${state.stateMachineInfo.objectName}'`);
-        console.log(`   - Setter Fn:   '${setterName}'`);
-        console.log(`   - Calculator Fn: '${calculatorName}'`);
-        console.log(`   - Logic map size: ${logicMap.size}\n`);
+        debug.log(`\n[STATE-MACHINE] State Machine fully parsed!`);
+        debug.log(`   - Object Name: '${state.stateMachineInfo.objectName}'`);
+        debug.log(`   - Setter Fn:   '${setterName}'`);
+        debug.log(`   - Calculator Fn: '${calculatorName}'`);
+        debug.log(`   - Logic map size: ${logicMap.size}\n`);
         path.getStatementParent().remove();
       } else {
-        console.log(
+        debug.log(
           `  -> [FAIL] Could not identify both a setter and a calculator from the properties.`
         );
       }
@@ -211,7 +212,7 @@ export const solveStateMachine = {
           const evaluation = stateArg.evaluate();
           if (evaluation.confident) {
             state.currentMachineState = evaluation.value;
-            console.log(
+            debug.log(
               `[STATE-MACHINE] State set to: ${
                 state.currentMachineState
               } from call ${gen(path.node)}`
@@ -222,7 +223,7 @@ export const solveStateMachine = {
               path.replaceWith(t.identifier("undefined"));
             }
           } else {
-            console.warn(
+            debug.warn(
               `[STATE-MACHINE] Could not determine state value for: ${gen(
                 path.node
               )}`
@@ -233,7 +234,7 @@ export const solveStateMachine = {
         if (propName === info.calculatorName) {
           const currentState = state.currentMachineState;
           if (currentState === null) {
-            console.warn(
+            debug.warn(
               `[STATE-MACHINE] Calculator called before state was set: ${gen(
                 path.node
               )}`
@@ -243,7 +244,7 @@ export const solveStateMachine = {
 
           const logicNode = info.logicMap.get(currentState);
           if (!logicNode) {
-            console.warn(
+            debug.warn(
               `[STATE-MACHINE] No logic for state ${currentState} in call: ${gen(
                 path.node
               )}`
@@ -254,7 +255,7 @@ export const solveStateMachine = {
           const argValues = path.get("arguments").map((p) => {
             const evalResult = p.evaluate();
             if (!evalResult.confident) {
-              console.error(
+              debug.error(
                 `Argument ${gen(p.node)} could not be evaluated confidently.`
               );
             }
@@ -263,14 +264,14 @@ export const solveStateMachine = {
 
           try {
             const result = evaluateAstNode(logicNode, argValues);
-            console.log(
+            debug.log(
               `[STATE-MACHINE] Solved ${gen(
                 path.node
               )} with state ${currentState} => ${result}`
             );
             path.replaceWith(t.valueToNode(result));
           } catch (e) {
-            console.error(
+            debug.error(
               `[STATE-MACHINE] Failed evaluation for ${gen(path.node)}: ${
                 e.message
               }`

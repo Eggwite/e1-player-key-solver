@@ -19,7 +19,7 @@ import {
   printResults,
   createExtractionSummary,
 } from "../utils/extractionUtils.js";
-
+import { debug } from "../../centralDebug.js";
 /**
  * Logs the results of the collection phases
  */
@@ -27,19 +27,19 @@ function logCollectionResults(segmentFunctionsMap, potentialKeyArrays) {
   const assemblerDebug = debugLoggers.assemblerLogic;
   const arrayDebug = debugLoggers.arrayJoin;
 
-  console.log("\n--- Collection Phase Results ---");
+  debug.log("\n--- Collection Phase Results ---");
 
   const mapKeys = Object.keys(segmentFunctionsMap);
-  console.log(`Segment functions collected: ${mapKeys.length}`);
+  debug.log(`Segment functions collected: ${mapKeys.length}`);
 
   if (mapKeys.length > 0) {
     assemblerDebug.log("Available segment keys:", mapKeys.join(", "));
   } else {
-    console.log("No segment functions available for key extraction.");
+    debug.log("No segment functions available for key extraction.");
   }
 
   const arrayKeys = Object.keys(potentialKeyArrays);
-  console.log(`Potential key arrays collected: ${arrayKeys.length}`);
+  debug.log(`Potential key arrays collected: ${arrayKeys.length}`);
 
   if (arrayKeys.length > 0) {
     arrayDebug.log("Available array keys:", arrayKeys.join(", "));
@@ -67,14 +67,14 @@ export const findAndExtractKeyPlugin = (api) => {
         let wrongLengthCandidates = [];
 
         // PASS 1: Collect array literals
-        console.log("Starting Pass 1: Array Collection...");
+        debug.log("Starting Pass 1: Array Collection...");
         const arrayCollector = new ArrayCollector();
         arrayCollector.setTypes(t);
         programPath.traverse(arrayCollector.createVisitor());
         const potentialKeyArrays = arrayCollector.getArrays();
 
         // PASS 2: Collect segment functions
-        console.log("Starting Pass 2: Segment Function Collection...");
+        debug.log("Starting Pass 2: Segment Function Collection...");
         const segmentFunctionCollector = new SegmentFunctionCollector();
         segmentFunctionCollector.setTypes(t);
         programPath.traverse(segmentFunctionCollector.createVisitor());
@@ -87,7 +87,7 @@ export const findAndExtractKeyPlugin = (api) => {
         logCollectionResults(segmentFunctionsMap, potentialKeyArrays);
 
         // PASS 3: Extract keys using various patterns
-        console.log("Starting Pass 3: Key Extraction...");
+        debug.log("Starting Pass 3: Key Extraction...");
 
         // --- New: Track object property assignments and aliases for edge-case key extraction ---
         const objectPropertiesMap = {};

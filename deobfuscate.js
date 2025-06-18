@@ -8,12 +8,23 @@ import { solveStringArray } from "./transformers/solveStringArray.js";
 import { solveStateMachine } from "./transformers/solveStateMachine.js";
 import { inlineStringArray } from "./transformers/inlineStringArray.js";
 import { findAndExtractKeyPlugin } from "./transformers/findAndExtractKey.js";
+import { debug, setDebug } from "./transformers/centralDebug.js";
+
+// Process command line arguments
+const inputFile = process.argv[2] || "input.txt"; // Default to input.txt if no arg provided
+const silentMode = process.argv.includes("--silent");
+
+// If silent mode, disable all debug logs
+if (silentMode) {
+  setDebug(false);
+}
 
 try {
   let intermediateCode;
   // normalize literals and unflatten cf
-  const inputCode = fs.readFileSync("input.txt", "utf-8");
-  console.log(
+  debug.log(`Reading input from: ${inputFile}`);
+  const inputCode = fs.readFileSync(inputFile, "utf-8");
+  debug.log(
     "--- Starting Pass 1: Normalizing Literals and Unflattening Control Flow ---"
   );
   const unflattenedResult = babel.transformSync(inputCode, {
@@ -28,11 +39,10 @@ try {
     );
   }
   intermediateCode = unflattenedResult.code;
-  fs.writeFileSync("output.js", intermediateCode, "utf-8");
-  console.log("Pass 1 complete.");
+  debug.log("Pass 1 complete.");
 
   // inline data
-  console.log("--- Starting Pass 2: Inlining Arrays and Wrapper Funcs ---");
+  debug.log("--- Starting Pass 2: Inlining Arrays and Wrapper Funcs ---");
   const inlinedDataResult = babel.transformSync(intermediateCode, {
     sourceType: "script",
     plugins: [inlineArrayBuilder, inlineWrapperFunctions],
@@ -43,11 +53,10 @@ try {
     throw new Error("Pass 2 (Inlining Arbitrary Data) failed to produce code.");
   }
   intermediateCode = inlinedDataResult.code;
-  fs.writeFileSync("output.js", intermediateCode, "utf-8");
-  console.log("Pass 2 complete.");
+  debug.log("Pass 2 complete.");
 
   // solve string array and state machine
-  console.log(
+  debug.log(
     "--- Starting Pass 3: Solving String Array and Solving State Machine ---"
   );
   const transformStringArray = babel.transformSync(intermediateCode, {
@@ -62,11 +71,10 @@ try {
     );
   }
   intermediateCode = transformStringArray.code;
-  fs.writeFileSync("output.js", intermediateCode, "utf-8");
-  console.log("Pass 3 complete.");
+  debug.log("Pass 3 complete.");
 
   // solve string array and state machine
-  console.log("--- Starting Pass 4: Inlining String Array ---");
+  debug.log("--- Starting Pass 4: Inlining String Array ---");
   const inlineStringArr = babel.transformSync(intermediateCode, {
     sourceType: "script",
     plugins: [inlineStringArray],
@@ -77,18 +85,19 @@ try {
     throw new Error("Pass 4 (Inlining String Array) failed to produce code.");
   }
   intermediateCode = inlineStringArr.code;
-  fs.writeFileSync("output.js", intermediateCode, "utf-8");
-  console.log("Pass 4 complete.");
+  debug.log("Pass 4 complete.");
 
   // --- Pass 5, find and extract key ---
-  console.log("--- Starting Pass 5: Finding and Extracting AES Key ---");
+  debug.log("--- Starting Pass 5: Finding and Extracting AES Key ---");
   const keyExtractionResult = babel.transformSync(intermediateCode, {
     sourceType: "script",
     plugins: [findAndExtractKeyPlugin],
     code: false, // We don't actually need the code output for this pass
   });
-  console.log("Pass 5 complete.");
+  debug.log("Pass 5 complete.");
+
   // The key, if found, is printed by the plugin
 } catch (err) {
   console.error("\nAn error occurred during deobfuscation:", err);
+  process.exit(1);
 }

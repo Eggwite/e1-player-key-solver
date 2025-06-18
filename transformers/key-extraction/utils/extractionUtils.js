@@ -32,25 +32,26 @@ export function printResults(
 
   if (foundKeys.length > 0) {
     if (findAllCandidates || foundKeys.length === 1) {
-      console.log(`--- Found ${foundKeys.length} Potential AES Key(s) ---`);
+      debug.log(`--- Found ${foundKeys.length} Potential AES Key(s) ---`);
       foundKeys.forEach((item, idx) => {
-        console.log(`\n--- Candidate Key ${idx + 1} ---`);
-        console.log("Derived Key:", item.key);
+        debug.log(`\n--- Candidate Key ${idx + 1} ---`);
+        debug.log("Derived Key:", item.key);
+        console.log(item.key);
         if (item.segments) {
-          console.log("Involved Segments:", item.segments.join(", "));
+          debug.log("Involved Segments:", item.segments.join(", "));
         }
         if (item.source) {
-          console.log("Source:", item.source);
+          debug.log("Source:", item.source);
         }
-        console.log("Key Type:", item.type);
+        debug.log("Key Type:", item.type);
       });
     } else {
-      console.log(
+      debug.log(
         `--- Found ${foundKeys.length} Potential AES Keys (not all candidates shown) ---`
       );
     }
   } else {
-    console.log("--- AES Key Not Found ---");
+    debug.log("--- AES Key Not Found ---");
   }
 
   // Print debug information about failed candidates if debug is enabled
