@@ -23,5 +23,8 @@
     "@babel/traverse": "^7.27.4",
     "@babel/types": "^7.27.6",
     "crypto-js": "^4.2.0"
+  },
+  "devDependencies": {
+    "babel-plugin-minify-dead-code-elimination": "^0.5.2"
   }
 }

@@ -1,7 +1,7 @@
 // Centralized DEBUG utility for logging
 // Replace all direct console.log/warn/error calls with these for easy control
 
-let DEBUG = true; // Toggle this variable to enable/disable logs
+let DEBUG = false; // Toggle this variable to enable/disable logs
 
 export const setDebug = (value) => {
   DEBUG = value;

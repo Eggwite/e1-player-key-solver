@@ -4,7 +4,7 @@
 
 export const DEBUG_CONFIG = {
   // Enable/disable all debug logs
-  ENABLED: true,
+  ENABLED: false,
 
   // Specific debug categories
   SEGMENT_FUNCTIONS: true,

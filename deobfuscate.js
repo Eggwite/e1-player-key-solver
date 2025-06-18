@@ -11,6 +11,7 @@ import { findAndExtractKeyPlugin } from "./transformers/findAndExtractKey.js";
 import { debug, setDebug } from "./transformers/centralDebug.js";
 import { inlineObjectFunctionProperties } from "./transformers/inlineObjectFunctionProperties.js";
 import { removeDeadBranches } from "./transformers/removeDeadBranches.js";
+import { removeUnusedVariables } from "./transformers/removeUnusedVariables.js";
 // Process command line arguments
 const inputFile = process.argv[2] || "input.txt"; // Default to input.txt if no arg provided
 const silentMode = process.argv.includes("--silent");
@@ -88,28 +89,24 @@ try {
   intermediateCode = inlineStringArr.code;
   debug.log("Pass 4 complete.");
 
-  // --- Pass 5: Iterative Simplification ---
+  // --- Pass 5: Simplification ---
   debug.log(
-    "--- Starting Pass 5: Iterative Simplification (Inlining and Dead Branch Removal) ---"
+    "--- Starting Pass 5: Simplification (Inlining and Dead Branch Removal) ---"
   );
-  let previousCode;
-  let passCount = 0;
-  do {
-    passCount++;
-    previousCode = intermediateCode;
-    const simplificationResult = babel.transformSync(previousCode, {
-      sourceType: "script",
-      plugins: [inlineObjectFunctionProperties, removeDeadBranches],
-      code: true,
-    });
-    if (!simplificationResult || !simplificationResult.code) {
-      throw new Error(
-        `Pass 5 (Simplification) failed on iteration ${passCount}.`
-      );
-    }
-    intermediateCode = simplificationResult.code;
-  } while (intermediateCode !== previousCode && passCount < 10); // Loop until code stabilizes
-  debug.log(`Pass 5 complete after ${passCount} iterations.`);
+  const simplificationResult = babel.transformSync(intermediateCode, {
+    sourceType: "script",
+    plugins: [
+      inlineObjectFunctionProperties,
+      removeDeadBranches,
+      removeUnusedVariables,
+    ],
+    code: true,
+  });
+  if (!simplificationResult || !simplificationResult.code) {
+    throw new Error("Pass 5 (Simplification) failed.");
+  }
+  intermediateCode = simplificationResult.code;
+  debug.log("Pass 5 complete.");
 
   // --- Pass 6, find and extract key ---
   debug.log("--- Starting Pass 6: Finding and Extracting AES Key ---");
