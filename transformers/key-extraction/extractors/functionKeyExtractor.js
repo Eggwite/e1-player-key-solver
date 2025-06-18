@@ -34,6 +34,7 @@ export class FunctionKeyExtractor {
     wrongLengthCandidates,
     findAllCandidates
   ) {
+    // Use enter visitors to catch nested functions/variables
     return {
       FunctionDeclaration: (path) => {
         this.handleFunctionDeclaration(
@@ -61,6 +62,40 @@ export class FunctionKeyExtractor {
           wrongLengthCandidates,
           findAllCandidates
         );
+      },
+      // Traverse into all BlockStatements to catch nested declarations
+      BlockStatement: {
+        enter: (blockPath) => {
+          blockPath.traverse({
+            FunctionDeclaration: (path) => {
+              this.handleFunctionDeclaration(
+                path,
+                foundKeys,
+                nonHexCandidates,
+                wrongLengthCandidates,
+                findAllCandidates
+              );
+            },
+            VariableDeclarator: (path) => {
+              this.handleVariableDeclarator(
+                path,
+                foundKeys,
+                nonHexCandidates,
+                wrongLengthCandidates,
+                findAllCandidates
+              );
+            },
+            AssignmentExpression: (path) => {
+              this.handleAssignmentExpression(
+                path,
+                foundKeys,
+                nonHexCandidates,
+                wrongLengthCandidates,
+                findAllCandidates
+              );
+            },
+          });
+        },
       },
     };
   }

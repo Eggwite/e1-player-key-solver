@@ -224,13 +224,32 @@ export const findAndExtractKeyPlugin = (api) => {
 
         // Create combined visitor for key extraction
         const keyExtractionVisitor = {
+          // Use enter visitors to catch nested functions/variables
+          FunctionDeclaration: {
+            enter: functionKeyExtractor.createVisitors(
+              foundKeys,
+              nonHexCandidates,
+              wrongLengthCandidates,
+              FIND_ALL_CANDIDATES
+            ).FunctionDeclaration,
+          },
+          VariableDeclarator: {
+            enter: functionKeyExtractor.createVisitors(
+              foundKeys,
+              nonHexCandidates,
+              wrongLengthCandidates,
+              FIND_ALL_CANDIDATES
+            ).VariableDeclarator,
+          },
+          AssignmentExpression: {
+            enter: functionKeyExtractor.createVisitors(
+              foundKeys,
+              nonHexCandidates,
+              wrongLengthCandidates,
+              FIND_ALL_CANDIDATES
+            ).AssignmentExpression,
+          },
           CallExpression: arrayJoinExtractor.createCallExpressionHandler(
-            foundKeys,
-            nonHexCandidates,
-            wrongLengthCandidates,
-            FIND_ALL_CANDIDATES
-          ),
-          ...functionKeyExtractor.createVisitors(
             foundKeys,
             nonHexCandidates,
             wrongLengthCandidates,

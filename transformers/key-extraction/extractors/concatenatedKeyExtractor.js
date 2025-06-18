@@ -31,15 +31,21 @@ export class ConcatenatedKeyExtractor {
     }
     for (const stmt of blockNode.body) {
       if (t.isReturnStatement(stmt) && t.isStringLiteral(stmt.argument)) {
-        this.debug.log(`_findStringReturnInBlock: Found direct return: ${stmt.argument.value}`);
+        this.debug.log(
+          `_findStringReturnInBlock: Found direct return: ${stmt.argument.value}`
+        );
         return stmt.argument.value;
       }
       if (t.isIfStatement(stmt)) {
-        this.debug.log("_findStringReturnInBlock: Checking IfStatement consequent.");
+        this.debug.log(
+          "_findStringReturnInBlock: Checking IfStatement consequent."
+        );
         let returned = this._findStringReturnInBlock(stmt.consequent);
         if (returned) return returned;
         if (stmt.alternate) {
-          this.debug.log("_findStringReturnInBlock: Checking IfStatement alternate.");
+          this.debug.log(
+            "_findStringReturnInBlock: Checking IfStatement alternate."
+          );
           returned = this._findStringReturnInBlock(stmt.alternate);
           if (returned) return returned;
         }
@@ -244,11 +250,14 @@ export class ConcatenatedKeyExtractor {
       t.isCallExpression(node) &&
       t.isMemberExpression(node.callee) &&
       t.isIdentifier(node.callee.object) && // Ensure object is an Identifier
-      (t.isStringLiteral(node.callee.property) || t.isIdentifier(node.callee.property))
+      (t.isStringLiteral(node.callee.property) ||
+        t.isIdentifier(node.callee.property))
     ) {
       const rawObjName = node.callee.object.name;
       const objName = this.resolveObjectName(rawObjName); // Use alias resolver
-      const propName = t.isStringLiteral(node.callee.property) ? node.callee.property.value : node.callee.property.name;
+      const propName = t.isStringLiteral(node.callee.property)
+        ? node.callee.property.value
+        : node.callee.property.name;
 
       if (
         this.objectPropertiesMap &&
@@ -256,13 +265,17 @@ export class ConcatenatedKeyExtractor {
         this.objectPropertiesMap[objName][propName]
       ) {
         const funcNode = this.objectPropertiesMap[objName][propName];
-        if (t.isFunctionExpression(funcNode) || t.isArrowFunctionExpression(funcNode)) {
+        if (
+          t.isFunctionExpression(funcNode) ||
+          t.isArrowFunctionExpression(funcNode)
+        ) {
           let returnValue = null;
-          
+
           if (t.isBlockStatement(funcNode.body)) {
             // Use the new helper to find return value
             returnValue = this._findStringReturnInBlock(funcNode.body);
-          } else if (t.isStringLiteral(funcNode.body)) { // Arrow function with implicit return
+          } else if (t.isStringLiteral(funcNode.body)) {
+            // Arrow function with implicit return
             returnValue = funcNode.body.value;
             this.debug.log(
               `getStringFromNode for ${assemblerFuncName}: Arrow function property '${rawObjName}["${propName}"]()' implicitly returned '${returnValue}'`
@@ -273,7 +286,10 @@ export class ConcatenatedKeyExtractor {
             this.debug.log(
               `getStringFromNode for ${assemblerFuncName}: Resolved function property call '${rawObjName}["${propName}"]()' to '${returnValue}'`
             );
-            return { value: returnValue, segments: [`${objName}.${propName}()`] };
+            return {
+              value: returnValue,
+              segments: [`${objName}.${propName}()`],
+            };
           } else {
             this.debug.log(
               `getStringFromNode for ${assemblerFuncName}: Function property call '${rawObjName}["${propName}"]()' did not resolve to a string literal (checked if-statements). Body type: ${funcNode.body.type}`
@@ -409,5 +425,112 @@ export class ConcatenatedKeyExtractor {
    */
   getInvolvedSegments(parts) {
     return this.lastSegments || [];
+  }
+
+  /**
+   * Extracts the key by resolving and concatenating segments from a BinaryExpression.
+   * @param {NodePath} path - The NodePath of the BinaryExpression.
+   * @returns {string|null} The extracted key or null if extraction fails.
+   */
+  extract(path) {
+    const segments = this.resolveSegments(path);
+    if (segments) {
+      const key = segments.join("");
+      this.debugLog(`Concatenated key: ${key}`);
+      return key;
+    }
+    return null;
+  }
+
+  /**
+   * Resolves all segments of a concatenated key from a BinaryExpression.
+   * @param {NodePath} path - The NodePath of the BinaryExpression.
+   * @returns {string[]|null} An array of key segments or null.
+   */
+  resolveSegments(path) {
+    const segments = [];
+    let currentPath = path;
+
+    while (currentPath.isBinaryExpression({ operator: "+" })) {
+      const rightSegment = this.resolveSegment(currentPath.get("right"));
+      if (rightSegment === null) return null;
+      segments.unshift(rightSegment);
+      currentPath = currentPath.get("left");
+    }
+
+    const leftSegment = this.resolveSegment(currentPath);
+    if (leftSegment === null) return null;
+    segments.unshift(leftSegment);
+
+    return segments;
+  }
+
+  /**
+   * Resolves a single segment of the key.
+   * @param {NodePath} path - The NodePath of the segment.
+   * @returns {string|null} The resolved segment or null.
+   */
+  resolveSegment(path) {
+    if (path.isStringLiteral()) {
+      return path.node.value;
+    }
+
+    if (path.isCallExpression()) {
+      const callee = path.get("callee");
+      const resolvedFunc = this.resolveSegment(callee);
+      if (resolvedFunc && typeof resolvedFunc === "function") {
+        try {
+          // This is a simplified simulation. A more robust solution might
+          // require a sandbox environment to safely execute the function.
+          return resolvedFunc();
+        } catch (e) {
+          this.debugLog(`Error executing function segment: ${e.message}`);
+          return null;
+        }
+      }
+    }
+
+    if (path.isMemberExpression()) {
+      const binding = path.scope.getBinding(path.node.object.name);
+
+      if (binding && binding.path.isVariableDeclarator()) {
+        let init = binding.path.get("init");
+
+        // Resolve alias if the init is an Identifier
+        if (init.isIdentifier()) {
+          const aliasBinding = init.scope.getBinding(init.node.name);
+          if (aliasBinding && aliasBinding.path.isVariableDeclarator()) {
+            init = aliasBinding.path.get("init");
+          }
+        }
+
+        if (init.isObjectExpression()) {
+          const propertyName = path.node.property.value;
+          const property = init
+            .get("properties")
+            .find((p) => p.node.key.value === propertyName);
+          if (property) {
+            const valuePath = property.get("value");
+            if (valuePath.isStringLiteral()) {
+              return valuePath.node.value;
+            } else if (valuePath.isFunctionExpression()) {
+              // Attempt to resolve the function's return value
+              let returnedValue = null;
+              valuePath.traverse({
+                ReturnStatement: (returnPath) => {
+                  if (returnPath.get("argument").isStringLiteral()) {
+                    returnedValue = returnPath.get("argument").node.value;
+                  }
+                },
+              });
+              return returnedValue;
+            }
+          }
+        }
+      }
+    }
+
+    this.debugLog(`Unable to resolve segment: ${path.type}`);
+    return null;
   }
 }
