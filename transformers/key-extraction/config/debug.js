@@ -4,15 +4,15 @@
 
 export const DEBUG_CONFIG = {
   // Enable/disable all debug logs
-  ENABLED: false,
+  ENABLED: true,
 
   // Specific debug categories
-  SEGMENT_FUNCTIONS: false,
-  ASSEMBLER_LOGIC: false,
-  ARRAY_JOIN: false,
-  CHAR_CODE: false,
-  VALIDATION: false,
-  PERFORMANCE: false,
+  SEGMENT_FUNCTIONS: true,
+  ASSEMBLER_LOGIC: true,
+  ARRAY_JOIN: true,
+  CHAR_CODE: true,
+  VALIDATION: true,
+  PERFORMANCE: true,
 };
 
 /**

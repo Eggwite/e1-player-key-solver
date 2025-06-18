@@ -9,7 +9,8 @@ import { solveStateMachine } from "./transformers/solveStateMachine.js";
 import { inlineStringArray } from "./transformers/inlineStringArray.js";
 import { findAndExtractKeyPlugin } from "./transformers/findAndExtractKey.js";
 import { debug, setDebug } from "./transformers/centralDebug.js";
-
+import { inlineObjectFunctionProperties } from "./transformers/inlineObjectFunctionProperties.js";
+import { removeDeadBranches } from "./transformers/removeDeadBranches.js";
 // Process command line arguments
 const inputFile = process.argv[2] || "input.txt"; // Default to input.txt if no arg provided
 const silentMode = process.argv.includes("--silent");
@@ -73,7 +74,7 @@ try {
   intermediateCode = transformStringArray.code;
   debug.log("Pass 3 complete.");
 
-  // solve string array and state machine
+  // --- Pass 4: Inlining String Array ---
   debug.log("--- Starting Pass 4: Inlining String Array ---");
   const inlineStringArr = babel.transformSync(intermediateCode, {
     sourceType: "script",
@@ -87,14 +88,49 @@ try {
   intermediateCode = inlineStringArr.code;
   debug.log("Pass 4 complete.");
 
-  // --- Pass 5, find and extract key ---
-  debug.log("--- Starting Pass 5: Finding and Extracting AES Key ---");
+  // --- Pass 5: Iterative Simplification ---
+  debug.log(
+    "--- Starting Pass 5: Iterative Simplification (Inlining and Dead Branch Removal) ---"
+  );
+  let previousCode;
+  let passCount = 0;
+  do {
+    passCount++;
+    previousCode = intermediateCode;
+    const simplificationResult = babel.transformSync(previousCode, {
+      sourceType: "script",
+      plugins: [inlineObjectFunctionProperties, removeDeadBranches],
+      code: true,
+    });
+    if (!simplificationResult || !simplificationResult.code) {
+      throw new Error(
+        `Pass 5 (Simplification) failed on iteration ${passCount}.`
+      );
+    }
+    intermediateCode = simplificationResult.code;
+  } while (intermediateCode !== previousCode && passCount < 10); // Loop until code stabilizes
+  debug.log(`Pass 5 complete after ${passCount} iterations.`);
+
+  // --- Pass 6, find and extract key ---
+  debug.log("--- Starting Pass 6: Finding and Extracting AES Key ---");
   const keyExtractionResult = babel.transformSync(intermediateCode, {
     sourceType: "script",
     plugins: [findAndExtractKeyPlugin],
     code: false, // We don't actually need the code output for this pass
   });
-  debug.log("Pass 5 complete.");
+  debug.log("Pass 6 complete.");
+
+  // Write final code to output.js for inspection
+  const finalResult = babel.transformSync(intermediateCode, {
+    sourceType: "script",
+    // Add no plugins here, just parse and generate code
+    code: true,
+    ast: false,
+  });
+  if (finalResult && finalResult.code) {
+    fs.writeFileSync("output.js", finalResult.code, "utf-8");
+    debug.log("Wrote final code to output.js");
+  }
 
   // The key, if found, is printed by the plugin
 } catch (err) {

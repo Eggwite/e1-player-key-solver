@@ -296,31 +296,34 @@ export class ArrayJoinExtractor {
 
   extractSourceArrayName(mapCallbackPath, paramName, t) {
     const bodyPath = mapCallbackPath.get("body");
-    const bodyNode = bodyPath.node;
     let sourceArrayName = null;
 
-    if (t.isBlockStatement(bodyNode)) {
+    const visitor = {
+      MemberExpression(memberPath) {
+        if (
+          t.isIdentifier(memberPath.node.object) &&
+          t.isIdentifier(memberPath.node.property, { name: paramName })
+        ) {
+          sourceArrayName = memberPath.node.object.name;
+          memberPath.stop();
+        }
+      },
+    };
+
+    if (t.isBlockStatement(bodyPath.node)) {
       bodyPath.traverse({
         ReturnStatement(returnPath) {
           if (returnPath.getFunctionParent() === mapCallbackPath) {
-            const returnArg = returnPath.node.argument;
-            if (
-              t.isMemberExpression(returnArg) &&
-              t.isIdentifier(returnArg.object) &&
-              t.isIdentifier(returnArg.property, { name: paramName })
-            ) {
-              sourceArrayName = returnArg.object.name;
+            returnPath.get("argument").traverse(visitor);
+            if (sourceArrayName) {
+              returnPath.stop();
             }
           }
         },
       });
-    } else if (t.isMemberExpression(bodyNode)) {
-      if (
-        t.isIdentifier(bodyNode.object) &&
-        t.isIdentifier(bodyNode.property, { name: paramName })
-      ) {
-        sourceArrayName = bodyNode.object.name;
-      }
+    } else {
+      // Implicit return
+      bodyPath.traverse(visitor);
     }
 
     return sourceArrayName;
@@ -480,38 +483,136 @@ export class ArrayJoinExtractor {
   ) {
     const sourceName = joinObject.callee.object.name;
     const arrayNodeToProcess = this.potentialKeyArrays[sourceName];
+
+    if (!arrayNodeToProcess || !t.isArrayExpression(arrayNodeToProcess)) {
+      return;
+    }
+
+    const mapCallbackPath = path.get("callee.object.arguments.0");
+    if (mapCallbackPath) {
+      const mapCallbackNode = mapCallbackPath.node;
+
+      // Check for the new pattern: .map(t => String.fromCharCode(parseInt(t, 16)))
+      if (
+        (t.isArrowFunctionExpression(mapCallbackNode) ||
+          t.isFunctionExpression(mapCallbackNode)) &&
+        mapCallbackNode.params.length === 1
+      ) {
+        let returnedValueNode = null;
+        if (t.isBlockStatement(mapCallbackNode.body)) {
+          // Find return statement
+          mapCallbackPath.get("body").traverse({
+            ReturnStatement(returnPath) {
+              if (returnPath.getFunctionParent() === mapCallbackPath) {
+                returnedValueNode = returnPath.get("argument").node;
+              }
+            },
+          });
+        } else {
+          // Implicit return
+          returnedValueNode = mapCallbackNode.body;
+        }
+
+        if (returnedValueNode && t.isCallExpression(returnedValueNode)) {
+          const fromCharCodeCall = returnedValueNode;
+          const fromCharCodeCallee = fromCharCodeCall.callee;
+
+          // Check for .fromCharCode call
+          if (
+            t.isMemberExpression(fromCharCodeCallee) &&
+            (t.isIdentifier(fromCharCodeCallee.property, {
+              name: "fromCharCode",
+            }) ||
+              t.isStringLiteral(fromCharCodeCallee.property, {
+                value: "fromCharCode",
+              })) &&
+            fromCharCodeCall.arguments.length === 1 &&
+            t.isCallExpression(fromCharCodeCall.arguments[0])
+          ) {
+            const parseIntCall = fromCharCodeCall.arguments[0];
+            const parseIntArgs = parseIntCall.arguments;
+            const mapParam = mapCallbackNode.params[0];
+
+            // Check for parseInt(param, 16) call
+            if (
+              parseIntArgs.length === 2 &&
+              t.isIdentifier(parseIntArgs[0], { name: mapParam.name }) &&
+              t.isNumericLiteral(parseIntArgs[1], { value: 16 })
+            ) {
+              this.debug.log(
+                `Found fromCharCode(parseInt(..., 16)) pattern in map for array '${sourceName}'`
+              );
+
+              if (
+                arrayNodeToProcess.elements.every((el) =>
+                  t.isStringLiteral(el)
+                )
+              ) {
+                try {
+                  const derivedKey = arrayNodeToProcess.elements
+                    .map((el) => String.fromCharCode(parseInt(el.value, 16)))
+                    .join("");
+
+                  const validationResult = validateKey(
+                    derivedKey,
+                    sourceName,
+                    "array_map_charcode_parseint"
+                  );
+
+                  if (
+                    this.categorizeValidationResult(
+                      validationResult,
+                      foundKeys,
+                      nonHexCandidates,
+                      wrongLengthCandidates
+                    )
+                  ) {
+                    if (!findAllCandidates) path.stop();
+                  }
+                  return; // Pattern handled
+                } catch (e) {
+                  this.debug.log(
+                    `Error processing fromCharCode(parseInt) pattern for '${sourceName}': ${e.message}`
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback to original logic
     const processingType = "array_map_join";
 
     this.debug.log(
       `Encountered ${sourceName}.map(...).join(''). Handling assumes map is identity-like or elements are pre-set.`
     );
 
-    if (arrayNodeToProcess && t.isArrayExpression(arrayNodeToProcess)) {
-      if (arrayNodeToProcess.elements.every((el) => t.isStringLiteral(el))) {
-        const derivedKey = arrayNodeToProcess.elements
-          .map((el) => el.value)
-          .join("");
-        const validationResult = validateKey(
-          derivedKey,
-          sourceName,
-          processingType
-        );
+    if (arrayNodeToProcess.elements.every((el) => t.isStringLiteral(el))) {
+      const derivedKey = arrayNodeToProcess.elements
+        .map((el) => el.value)
+        .join("");
+      const validationResult = validateKey(
+        derivedKey,
+        sourceName,
+        processingType
+      );
 
-        if (
-          this.categorizeValidationResult(
-            validationResult,
-            foundKeys,
-            nonHexCandidates,
-            wrongLengthCandidates
-          )
-        ) {
-          if (!findAllCandidates) path.stop();
-        }
-      } else {
-        this.debug.log(
-          `Array '${sourceName}' for .map.join does not consist entirely of string literals.`
-        );
+      if (
+        this.categorizeValidationResult(
+          validationResult,
+          foundKeys,
+          nonHexCandidates,
+          wrongLengthCandidates
+        )
+      ) {
+        if (!findAllCandidates) path.stop();
       }
+    } else {
+      this.debug.log(
+        `Array '${sourceName}' for .map.join does not consist entirely of string literals.`
+      );
     }
   }
 

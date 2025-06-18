@@ -2,6 +2,8 @@
  * Key validation utilities
  */
 
+const VALID_KEY_LENGTHS = [16, 24, 32, 48, 51, 64];
+
 /**
  * Validates a potential AES key
  * @param {string} keyString - The key string to validate
@@ -11,9 +13,9 @@
  */
 export function validateKey(keyString, sourceName, type = "unknown") {
   const isHex = /^[0-9a-fA-F]*$/.test(keyString);
-  const expectedLength = 64;
+  const isValidLength = VALID_KEY_LENGTHS.includes(keyString.length);
 
-  if (keyString.length === expectedLength) {
+  if (isValidLength) {
     if (isHex) {
       return {
         isValidKey: true,
@@ -36,7 +38,7 @@ export function validateKey(keyString, sourceName, type = "unknown") {
       source: sourceName,
       type: type,
       actualLength: keyString.length,
-      expectedLength: expectedLength,
+      expectedLength: VALID_KEY_LENGTHS,
     };
   }
 }
@@ -56,9 +58,9 @@ export function validateConcatenatedKey(
   if (!concatenatedString) return null;
 
   const isHex = /^[0-9a-fA-F]*$/.test(concatenatedString);
-  const expectedLength = 64;
+  const isValidLength = VALID_KEY_LENGTHS.includes(concatenatedString.length);
 
-  if (concatenatedString.length === expectedLength) {
+  if (isValidLength) {
     if (isHex) {
       return {
         isValidKey: true,
@@ -84,7 +86,7 @@ export function validateConcatenatedKey(
       type: "concatenated_functions",
       source: assemblerFuncName,
       actualLength: concatenatedString.length,
-      expectedLength: expectedLength,
+      expectedLength: VALID_KEY_LENGTHS,
     };
   }
 }

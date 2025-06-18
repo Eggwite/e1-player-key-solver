@@ -20,6 +20,18 @@ export class FunctionKeyExtractor {
     }
   }
 
+  setObjectPropertiesMap(objectPropertiesMap) {
+    if (this.concatenatedExtractor) {
+      this.concatenatedExtractor.setObjectPropertiesMap(objectPropertiesMap);
+    }
+  }
+
+  setAliasMap(aliasMap) {
+    if (this.concatenatedExtractor) {
+      this.concatenatedExtractor.setAliasMap(aliasMap);
+    }
+  }
+
   /**
    * Creates visitors for function-based key extraction
    * @param {Array} foundKeys - Array to store found keys

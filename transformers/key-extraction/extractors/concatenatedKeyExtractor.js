@@ -56,11 +56,21 @@ export class ConcatenatedKeyExtractor {
 
   // New helper to resolve object names using the alias map
   resolveObjectName(name) {
-    if (this.aliasMap && this.aliasMap[name]) {
-      this.debug.log(`Resolved alias '${name}' to '${this.aliasMap[name]}'`);
-      return this.aliasMap[name];
+    const seen = new Set();
+    let currentName = name;
+    while (this.aliasMap && this.aliasMap[currentName]) {
+      if (seen.has(currentName)) {
+        this.debug.log(`Circular alias reference detected for '${name}'`);
+        return name; // Return original name to avoid infinite loop
+      }
+      seen.add(currentName);
+      currentName = this.aliasMap[currentName];
     }
-    return name;
+
+    if (name !== currentName) {
+      this.debug.log(`Resolved alias '${name}' to '${currentName}'`);
+    }
+    return currentName;
   }
 
   /**
@@ -199,9 +209,10 @@ export class ConcatenatedKeyExtractor {
    * @param {Object} node - AST node
    * @param {string} assemblerFuncName - Name of assembler function for debug
    * @param {Object} t - Babel types
+   * @param {Object} [parentNode=null] - The parent AST node, if available
    * @returns {Object} {value: string|null, segments: Array}
    */
-  getStringFromNode(node, assemblerFuncName, t) {
+  getStringFromNode(node, assemblerFuncName, t, parentNode = null) {
     t = t || this.t;
     this.debug.log(
       `getStringFromNode for ${assemblerFuncName}: Input node type: ${
@@ -213,7 +224,7 @@ export class ConcatenatedKeyExtractor {
     if (
       t.isMemberExpression(node) &&
       !t.isCallExpression(
-        node.parentPath?.node
+        parentNode
       ) /* Check parent to avoid double processing if it's a callee */
     ) {
       if (
@@ -245,55 +256,49 @@ export class ConcatenatedKeyExtractor {
       }
     }
 
-    // Handle function property call: S["b"]()
+    // Handle call expressions on object properties: S["b"]()
     if (
       t.isCallExpression(node) &&
       t.isMemberExpression(node.callee) &&
-      t.isIdentifier(node.callee.object) && // Ensure object is an Identifier
+      t.isIdentifier(node.callee.object) &&
       (t.isStringLiteral(node.callee.property) ||
         t.isIdentifier(node.callee.property))
     ) {
       const rawObjName = node.callee.object.name;
-      const objName = this.resolveObjectName(rawObjName); // Use alias resolver
+      const objName = this.resolveObjectName(rawObjName);
       const propName = t.isStringLiteral(node.callee.property)
         ? node.callee.property.value
         : node.callee.property.name;
 
-      if (
-        this.objectPropertiesMap &&
-        this.objectPropertiesMap[objName] &&
-        this.objectPropertiesMap[objName][propName]
-      ) {
-        const funcNode = this.objectPropertiesMap[objName][propName];
+      if (this.objectPropertiesMap?.[objName]?.[propName]) {
+        const propValue = this.objectPropertiesMap[objName][propName];
+        // literal case
+        if (t.isStringLiteral(propValue)) {
+          this.debug.log(
+            `getStringFromNode: Resolved ${objName}.${propName} → '${propValue.value}'`
+          );
+          return { value: propValue.value, segments: [propName] };
+        }
+        // function case: pull its returned string
         if (
-          t.isFunctionExpression(funcNode) ||
-          t.isArrowFunctionExpression(funcNode)
+          (t.isFunctionExpression(propValue) ||
+            t.isArrowFunctionExpression(propValue)) &&
+          propValue.body
         ) {
-          let returnValue = null;
-
-          if (t.isBlockStatement(funcNode.body)) {
-            // Use the new helper to find return value
-            returnValue = this._findStringReturnInBlock(funcNode.body);
-          } else if (t.isStringLiteral(funcNode.body)) {
-            // Arrow function with implicit return
-            returnValue = funcNode.body.value;
+          // New: Handle implicit return from arrow function
+          if (t.isStringLiteral(propValue.body)) {
+            const rtn = propValue.body.value;
             this.debug.log(
-              `getStringFromNode for ${assemblerFuncName}: Arrow function property '${rawObjName}["${propName}"]()' implicitly returned '${returnValue}'`
+              `getStringFromNode: Resolved ${objName}.${propName}() → '${rtn}' (implicit return)`
             );
+            return { value: rtn, segments: [propName] };
           }
-
-          if (returnValue !== null) {
+          const rtn = this._findStringReturnInBlock(propValue.body);
+          if (rtn) {
             this.debug.log(
-              `getStringFromNode for ${assemblerFuncName}: Resolved function property call '${rawObjName}["${propName}"]()' to '${returnValue}'`
+              `getStringFromNode: Resolved ${objName}.${propName}() → '${rtn}'`
             );
-            return {
-              value: returnValue,
-              segments: [`${objName}.${propName}()`],
-            };
-          } else {
-            this.debug.log(
-              `getStringFromNode for ${assemblerFuncName}: Function property call '${rawObjName}["${propName}"]()' did not resolve to a string literal (checked if-statements). Body type: ${funcNode.body.type}`
-            );
+            return { value: rtn, segments: [propName] };
           }
         }
       }
@@ -353,7 +358,7 @@ export class ConcatenatedKeyExtractor {
     let parts = [];
     let allSegments = [];
 
-    const traverse = (currentNode, depth = 0) => {
+    const traverse = (currentNode, parentNode, depth = 0) => {
       this.debug.log(
         `${"  ".repeat(
           depth
@@ -374,8 +379,8 @@ export class ConcatenatedKeyExtractor {
             currentNode.operator
           }). Traversing left then right.`
         );
-        traverse(currentNode.left, depth + 1);
-        traverse(currentNode.right, depth + 1);
+        traverse(currentNode.left, currentNode, depth + 1);
+        traverse(currentNode.right, currentNode, depth + 1);
       } else {
         this.debug.log(
           `${"  ".repeat(
@@ -385,7 +390,8 @@ export class ConcatenatedKeyExtractor {
         const result = this.getStringFromNode(
           currentNode,
           assemblerFuncName,
-          t
+          t,
+          parentNode
         );
         if (result.value === null) {
           this.debug.log(
@@ -406,7 +412,7 @@ export class ConcatenatedKeyExtractor {
         node ? node.type : "N/A"
       }`
     );
-    traverse(node);
+    traverse(node, null);
     this.debug.log(
       `flattenConcatenation for ${assemblerFuncName}: Resulting parts: ${JSON.stringify(
         parts
