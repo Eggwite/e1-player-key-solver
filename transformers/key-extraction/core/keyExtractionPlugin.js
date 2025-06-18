@@ -217,9 +217,10 @@ export const findAndExtractKeyPlugin = (api) => {
           ExpressionStatement(path) {
             const t = api.types;
             const expr = path.node.expression;
+            if (!t.isAssignmentExpression(expr)) return;
+
             // Handles assignments like b3["b"] = function() {...} or b3.b = function() {...}
             if (
-              t.isAssignmentExpression(expr) &&
               t.isMemberExpression(expr.left) &&
               t.isIdentifier(expr.left.object) &&
               (t.isStringLiteral(expr.left.property) ||
@@ -233,6 +234,44 @@ export const findAndExtractKeyPlugin = (api) => {
               objectPropertiesMap[objName][propName] = expr.right;
               debugLoggers.assemblerLogic.log(
                 `Collected assigned property: ${objName}.${propName}`
+              );
+            }
+            // Handle S = b3 (alias assignment)
+            else if (t.isIdentifier(expr.left) && t.isIdentifier(expr.right)) {
+              aliasMap[expr.left.name] = expr.right.name;
+              debugLoggers.assemblerLogic.log(
+                `Collected alias (assignment): ${expr.left.name} = ${expr.right.name}`
+              );
+            }
+            // Handle b3 = {} (object assignment)
+            else if (
+              t.isIdentifier(expr.left) &&
+              t.isObjectExpression(expr.right)
+            ) {
+              const objName = expr.left.name;
+              objectPropertiesMap[objName] = objectPropertiesMap[objName] || {};
+              for (const prop of expr.right.properties) {
+                if (
+                  t.isObjectProperty(prop) &&
+                  (t.isStringLiteral(prop.key) || t.isIdentifier(prop.key))
+                ) {
+                  const propName = t.isStringLiteral(prop.key)
+                    ? prop.key.value
+                    : prop.key.name;
+                  objectPropertiesMap[objName][propName] = prop.value;
+                } else if (
+                  t.isObjectMethod(prop) &&
+                  (t.isStringLiteral(prop.key) || t.isIdentifier(prop.key))
+                ) {
+                  const propName = t.isStringLiteral(prop.key)
+                    ? prop.key.value
+                    : prop.key.name;
+                  objectPropertiesMap[objName][propName] = prop; // Store the whole method node
+                }
+              }
+              debugLoggers.assemblerLogic.log(
+                `Collected object properties via assignment for: ${objName}`,
+                objectPropertiesMap[objName]
               );
             }
           },
