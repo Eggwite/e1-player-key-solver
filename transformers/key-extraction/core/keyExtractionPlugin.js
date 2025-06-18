@@ -21,82 +21,6 @@ import {
 } from "../utils/extractionUtils.js";
 
 /**
- * Handles special case for variable declarations followed by assignments
- * This handles patterns like: let x; x = () => "value";
- */
-function handleVariableAssignments(programPath, segmentFunctionCollector, t) {
-  programPath.traverse({
-    VariableDeclaration(path) {
-      const declarations = path.node.declarations;
-      if (
-        declarations &&
-        declarations.length === 1 &&
-        t.isIdentifier(declarations[0].id) &&
-        declarations[0].init === null
-      ) {
-        const varName = declarations[0].id.name;
-        const parentNode = path.parentPath && path.parentPath.node;
-
-        if (parentNode && parentNode.body && Array.isArray(parentNode.body)) {
-          const parentBody = parentNode.body;
-          let currentIndex = parentBody.findIndex((stmt) => stmt === path.node);
-
-          if (currentIndex >= 0) {
-            // Look for assignment expressions after this variable declaration
-            for (let i = currentIndex + 1; i < parentBody.length; i++) {
-              const stmt = parentBody[i];
-              if (
-                t.isExpressionStatement(stmt) &&
-                t.isAssignmentExpression(stmt.expression) &&
-                t.isIdentifier(stmt.expression.left, { name: varName }) &&
-                t.isArrowFunctionExpression(stmt.expression.right)
-              ) {
-                const arrowFunc = stmt.expression.right;
-
-                // Process this assignment like a normal variable declarator
-                if (t.isStringLiteral(arrowFunc.body)) {
-                  segmentFunctionCollector.segmentFunctionsMap[varName] =
-                    arrowFunc.body.value;
-                } else if (t.isBlockStatement(arrowFunc.body)) {
-                  // Handle block body assignments
-                  processBlockBodyAssignment(
-                    arrowFunc,
-                    varName,
-                    segmentFunctionCollector,
-                    t
-                  );
-                }
-                break;
-              }
-            }
-          }
-        }
-      }
-    },
-  });
-}
-
-/**
- * Processes block body assignments for arrow functions
- */
-function processBlockBodyAssignment(
-  arrowFunc,
-  varName,
-  segmentFunctionCollector,
-  t
-) {
-  const bodyStmts = arrowFunc.body.body;
-
-  for (let stmt of bodyStmts) {
-    if (t.isReturnStatement(stmt) && t.isStringLiteral(stmt.argument)) {
-      segmentFunctionCollector.segmentFunctionsMap[varName] =
-        stmt.argument.value;
-      break;
-    }
-  }
-}
-
-/**
  * Logs the results of the collection phases
  */
 function logCollectionResults(segmentFunctionsMap, potentialKeyArrays) {
@@ -157,7 +81,7 @@ export const findAndExtractKeyPlugin = (api) => {
         const segmentFunctionsMap = segmentFunctionCollector.getFunctions();
 
         // Handle special case for variable declarations followed by assignments
-        handleVariableAssignments(programPath, segmentFunctionCollector, t);
+        // This logic is now integrated into SegmentFunctionCollector
 
         // Debug: Print collection results
         logCollectionResults(segmentFunctionsMap, potentialKeyArrays);

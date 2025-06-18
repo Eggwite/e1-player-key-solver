@@ -28,7 +28,65 @@ export class SegmentFunctionCollector {
       VariableDeclarator: (path) => {
         this.handleVariableDeclarator(path);
       },
+      VariableDeclaration: (path) => {
+        this.handleVariableDeclarationWithAssignment(path);
+      },
     };
+  }
+
+  handleVariableDeclarationWithAssignment(path) {
+    const t = this.t;
+    const declarations = path.node.declarations;
+    if (
+      !(
+        declarations &&
+        declarations.length === 1 &&
+        t.isIdentifier(declarations[0].id) &&
+        declarations[0].init === null
+      )
+    ) {
+      return;
+    }
+
+    const varName = declarations[0].id.name;
+    const parentNode = path.parentPath?.node;
+
+    if (parentNode && parentNode.body && Array.isArray(parentNode.body)) {
+      const parentBody = parentNode.body;
+      let currentIndex = parentBody.findIndex((stmt) => stmt === path.node);
+
+      if (currentIndex >= 0) {
+        // Look for assignment expressions after this variable declaration
+        for (let i = currentIndex + 1; i < parentBody.length; i++) {
+          const stmt = parentBody[i];
+          if (
+            t.isExpressionStatement(stmt) &&
+            t.isAssignmentExpression(stmt.expression) &&
+            t.isIdentifier(stmt.expression.left, { name: varName }) &&
+            (t.isArrowFunctionExpression(stmt.expression.right) ||
+              t.isFunctionExpression(stmt.expression.right))
+          ) {
+            const funcNode = stmt.expression.right;
+
+            // Process this assignment like a normal variable declarator
+            if (t.isStringLiteral(funcNode.body)) {
+              this.segmentFunctionsMap[varName] = funcNode.body.value;
+            } else if (t.isBlockStatement(funcNode.body)) {
+              for (let bodyStmt of funcNode.body.body) {
+                if (
+                  t.isReturnStatement(bodyStmt) &&
+                  t.isStringLiteral(bodyStmt.argument)
+                ) {
+                  this.segmentFunctionsMap[varName] = bodyStmt.argument.value;
+                  break;
+                }
+              }
+            }
+            break; // Found assignment, stop looking.
+          }
+        }
+      }
+    }
   }
 
   handleFunctionDeclaration(path) {
