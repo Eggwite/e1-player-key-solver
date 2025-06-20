@@ -72,6 +72,7 @@ export function printResults(foundKeys, nonHexCandidates, wrongLengthCandidates,
       foundKeys.forEach((item, idx) => {
         debug.log(`\n--- Candidate Key ${idx + 1} ---`);
         debug.log('Derived Key:', item.key);
+        // Output the key to standard output for easy copying
         console.log(item.key);
         if (item.segments) {
           debug.log('Involved Segments:', item.segments.join(', '));
@@ -80,6 +81,17 @@ export function printResults(foundKeys, nonHexCandidates, wrongLengthCandidates,
           debug.log('Source:', item.source);
         }
         debug.log('Key Type:', item.type);
+
+        // Add ASCII representation check for debugging
+        if (item.type && item.type.includes('fromCharCode')) {
+          debug.log(
+            'ASCII Representation:',
+            item.key
+              .split('')
+              .map(c => c.charCodeAt(0))
+              .join(',')
+          );
+        }
       });
     } else {
       debug.log(`--- Found ${foundKeys.length} Potential AES Keys (not all candidates shown) ---`);
@@ -91,6 +103,10 @@ export function printResults(foundKeys, nonHexCandidates, wrongLengthCandidates,
   // Print debug information about failed candidates if debug is enabled
   if (nonHexCandidates.length > 0) {
     debug.log(`Found ${nonHexCandidates.length} non-hex candidates`);
+    // Show first few non-hex candidates for debugging
+    nonHexCandidates.slice(0, 3).forEach((item, idx) => {
+      debug.log(`Non-hex candidate ${idx + 1}:`, item.result || item, 'from', item.source || 'unknown');
+    });
   }
 
   if (wrongLengthCandidates.length > 0) {

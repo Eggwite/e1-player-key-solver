@@ -1,6 +1,7 @@
 import * as t from '@babel/types';
 import { getStringFromLiteral } from '../utils/extractionUtils.js';
 import * as babel from '@babel/core';
+import { validateKey } from '../validators/keyValidator.js';
 
 /**
  * Extractor for keys constructed using `String.fromCharCode()`.
@@ -65,130 +66,283 @@ const createFromCharCodeExtractor = (foundKeys, nonHexCandidates, wrongLengthCan
 
   return {
     CallExpression(path) {
+      if (path.parentPath.isReturnStatement()) {
+        return; // Handled by the ReturnStatement visitor
+      }
       const { callee, arguments: args } = path.node;
 
-      // Check if the callee ends with .fromCharCode, or is a direct alias
-      const isFromCharCode =
-        (t.isMemberExpression(callee) && getStringFromLiteral(callee.property) === 'fromCharCode') ||
-        (t.isIdentifier(callee) && resolveAlias(callee.name) === 'fromCharCode');
+      // Enhanced alias detection for fromCharCode
+      let isFromCharCode = false;
+      let calleeName = null;
 
-      if (!isFromCharCode || args.length !== 1 || !t.isSpreadElement(args[0])) {
-        return;
-      }
+      // Check if the callee is String.fromCharCode or an alias to it
+      if (t.isMemberExpression(callee)) {
+        // enhanced alias detection for fromCharCode
+        const isFromCharCodeProperty =
+          (t.isIdentifier(callee.property) && callee.property.name === 'fromCharCode') ||
+          (t.isStringLiteral(callee.property) && callee.property.value === 'fromCharCode') ||
+          // also match computed form: obj['fromCharCode']
+          (callee.computed && t.isStringLiteral(callee.property) && callee.property.value === 'fromCharCode');
 
-      const spreadArgument = args[0].argument;
-
-      let charCodes;
-
-      // Case 1: String.fromCharCode(...[1, 2, 3])
-      if (t.isArrayExpression(spreadArgument)) {
-        charCodes = spreadArgument.elements
-          .map(element => {
-            if (t.isNumericLiteral(element)) {
-              return element.value;
+        if (isFromCharCodeProperty) {
+          // Check if object is String or an alias
+          if (t.isIdentifier(callee.object)) {
+            const objName = callee.object.name;
+            const resolvedName = resolveAlias(objName);
+            if (resolvedName === 'String' || objName === 'String') {
+              isFromCharCode = true;
+              calleeName = 'String.fromCharCode';
+            } else {
+              // Could be another object with fromCharCode
+              isFromCharCode = true;
+              calleeName = `${objName}.fromCharCode`;
             }
-            // Handle other literal types if necessary
-            return null;
-          })
-          .filter(code => code !== null);
-      }
-      // Case 2: String.fromCharCode(...someArray.map(fn))
-      else if (
-        t.isCallExpression(spreadArgument) &&
-        t.isMemberExpression(spreadArgument.callee) &&
-        getStringFromLiteral(spreadArgument.callee.property) === 'map'
-      ) {
-        const arraySource = spreadArgument.callee.object;
-        const mapFunction = spreadArgument.arguments[0];
-
-        let arrayValues;
-        if (t.isArrayExpression(arraySource)) {
-          arrayValues = arraySource.elements.map(e => e.value);
-        } else if (t.isIdentifier(arraySource)) {
-          const binding = path.scope.getBinding(arraySource.name);
-          if (binding && binding.path.isVariableDeclarator() && t.isArrayExpression(binding.path.node.init)) {
-            arrayValues = binding.path.node.init.elements.map(e => e.value);
           }
         }
-
-        if (arrayValues && (t.isArrowFunctionExpression(mapFunction) || t.isFunctionExpression(mapFunction))) {
-          // Evaluate the map function using AST analysis instead of `new Function`
-          const mapParam = mapFunction.params[0];
-          const body = mapFunction.body;
-          let returnExpr;
-
-          if (t.isBinaryExpression(body)) {
-            returnExpr = body;
-          } else if (t.isBlockStatement(body)) {
-            // Heuristic: find the first return statement in the function body.
-            // This is safer than execution but may not be correct for complex control flow.
-            let foundReturn;
-            babel.traverse(
-              mapFunction,
-              {
-                ReturnStatement(p) {
-                  foundReturn = p.node;
-                  p.stop();
-                }
-              },
-              path.scope,
-              path
-            );
-            if (foundReturn) {
-              returnExpr = foundReturn.argument;
-            }
-          }
-
-          if (returnExpr) {
-            if (t.isBinaryExpression(returnExpr) && mapParam && t.isIdentifier(mapParam)) {
-              const paramName = mapParam.name;
-              const { left, operator, right } = returnExpr;
-              if (t.isIdentifier(left) && left.name === paramName && t.isNumericLiteral(right)) {
-                const opFunc = {
-                  '+': (a, b) => a + b,
-                  '-': (a, b) => a - b,
-                  '*': (a, b) => a * b,
-                  '/': (a, b) => a / b
-                }[operator];
-                if (opFunc) {
-                  charCodes = arrayValues.map(val => opFunc(val, right.value));
-                }
-              }
-            } else if (t.isNumericLiteral(returnExpr)) {
-              charCodes = arrayValues.map(() => returnExpr.value);
-            }
-          } else {
-            // Fallback for complex map functions that can't be statically analyzed.
-            // Assume it's an identity function as a last resort.
-            charCodes = arrayValues;
-          }
-        }
+      } else if (t.isIdentifier(callee) && callee.name === 'fromCharCode') {
+        isFromCharCode = true;
+        calleeName = 'fromCharCode';
       }
-      // Case 3: const codes = [1,2,3]; String.fromCharCode(...codes)
-      else if (t.isIdentifier(spreadArgument)) {
-        const binding = path.scope.getBinding(spreadArgument.name);
-        if (binding && t.isVariableDeclarator(binding.path.node) && t.isArrayExpression(binding.path.node.init)) {
-          charCodes = binding.path.node.init.elements
+
+      if (!isFromCharCode) return;
+
+      // Handle different fromCharCode call patterns
+
+      // Case 1: fromCharCode with spread: String.fromCharCode(...array)
+      if (args.length === 1 && t.isSpreadElement(args[0])) {
+        const spreadArgument = args[0].argument;
+        let charCodes = null;
+
+        // Direct array spread: String.fromCharCode(...[1, 2, 3])
+        if (t.isArrayExpression(spreadArgument)) {
+          charCodes = spreadArgument.elements
             .map(element => {
               if (t.isNumericLiteral(element)) {
                 return element.value;
+              }
+              // Try to handle string literals that can be parsed as numbers
+              if (t.isStringLiteral(element)) {
+                const num = parseInt(element.value, 10);
+                if (!isNaN(num)) return num;
               }
               return null;
             })
             .filter(code => code !== null);
         }
+        // Variable reference spread: String.fromCharCode(...E)
+        else if (t.isIdentifier(spreadArgument)) {
+          // try declarator init
+          let arrNode = null;
+          const binding = path.scope.getBinding(spreadArgument.name);
+          if (binding && binding.path.isVariableDeclarator() && t.isArrayExpression(binding.path.node.init)) {
+            arrNode = binding.path.node.init;
+          } else if (binding) {
+            // fallback: search upwards for an assignment to the variable
+            path.findParent(p => {
+              if (p.isBlockStatement() || p.isProgram()) {
+                for (const stmtPath of p.get('body')) {
+                  if (stmtPath.isExpressionStatement() && stmtPath.get('expression').isAssignmentExpression()) {
+                    const assignment = stmtPath.get('expression').node;
+                    if (
+                      t.isIdentifier(assignment.left, { name: spreadArgument.name }) &&
+                      t.isArrayExpression(assignment.right)
+                    ) {
+                      arrNode = assignment.right;
+                      return true; // stop searching
+                    }
+                  }
+                }
+              }
+              return false; // continue searching upwards
+            });
+          }
+          if (arrNode) {
+            charCodes = arrNode.elements
+              .map(element => {
+                if (t.isNumericLiteral(element)) return element.value;
+                if (t.isStringLiteral(element)) {
+                  const n = parseInt(element.value, 10);
+                  if (!isNaN(n)) return n;
+                }
+                return null;
+              })
+              .filter(code => code !== null);
+          }
+        }
+
+        // Process the extracted character codes
+        if (charCodes && charCodes.length > 0) {
+          try {
+            const key = String.fromCharCode(...charCodes);
+            const result = validateKey(key, calleeName, 'fromCharCode_spread');
+
+            if (result.isValidKey) {
+              if (!foundKeys.some(fk => fk.key === key && fk.type === 'fromCharCode_spread')) {
+                foundKeys.push({ ...result });
+              }
+            } else if (result.isNonHex) {
+              nonHexCandidates.push({ result: key, source: calleeName, type: 'fromCharCode_spread' });
+            } else if (result.isWrongLength) {
+              wrongLengthCandidates.push({
+                result: key,
+                source: calleeName,
+                type: 'fromCharCode_spread',
+                length: result.actualLength,
+                expectedLength: result.expectedLength
+              });
+            }
+          } catch (e) {
+            // Handle any errors in processing
+            console.error(`Error processing fromCharCode with array:`, e);
+          }
+        }
       }
 
-      if (charCodes) {
-        const key = String.fromCharCode(...charCodes);
-        if (/^[0-9a-f]+$/i.test(key)) {
-          if (key.length === 32 || key.length === 64) {
-            foundKeys.push({ key: key, type: 'String.fromCharCode' });
-          } else {
-            wrongLengthCandidates.push(key);
+      // Case 2: Direct arguments: String.fromCharCode(65, 66, 67)
+      else if (
+        args.length > 0 &&
+        args.every(arg => t.isNumericLiteral(arg) || (t.isStringLiteral(arg) && !isNaN(parseInt(arg.value, 10))))
+      ) {
+        const charCodes = args
+          .map(arg => {
+            if (t.isNumericLiteral(arg)) return arg.value;
+            if (t.isStringLiteral(arg)) return parseInt(arg.value, 10);
+            return null;
+          })
+          .filter(code => code !== null);
+
+        if (charCodes.length > 0) {
+          try {
+            const key = String.fromCharCode(...charCodes);
+            const result = validateKey(key, calleeName, 'fromCharCode_direct');
+
+            if (result.isValidKey) {
+              if (!foundKeys.some(fk => fk.key === key && fk.type === 'fromCharCode_direct')) {
+                foundKeys.push({ ...result });
+              }
+            } else if (result.isNonHex) {
+              nonHexCandidates.push({ result: key, source: calleeName, type: 'fromCharCode_direct' });
+            } else if (result.isWrongLength) {
+              wrongLengthCandidates.push({
+                result: key,
+                source: calleeName,
+                type: 'fromCharCode_direct',
+                length: result.actualLength,
+                expectedLength: result.expectedLength
+              });
+            }
+          } catch (e) {
+            // Handle any errors in processing
+            console.error(`Error processing fromCharCode with direct args:`, e);
           }
-        } else {
-          nonHexCandidates.push(key);
+        }
+      }
+    },
+
+    // Add a visitor for ReturnStatement to catch arrow function returns with fromCharCode
+    ReturnStatement(path) {
+      const arg = path.node.argument;
+      if (t.isCallExpression(arg)) {
+        const { callee, arguments: args } = arg;
+
+        let isFromCharCode = false;
+        let calleeName = 'return_fromCharCode';
+
+        if (t.isMemberExpression(callee)) {
+          const isFromCharCodeProperty =
+            (t.isIdentifier(callee.property) && callee.property.name === 'fromCharCode') ||
+            (t.isStringLiteral(callee.property) && callee.property.value === 'fromCharCode') ||
+            // also match computed form in returns
+            (callee.computed && t.isStringLiteral(callee.property) && callee.property.value === 'fromCharCode');
+
+          if (isFromCharCodeProperty) {
+            if (t.isIdentifier(callee.object)) {
+              const objName = callee.object.name;
+              const resolvedName = resolveAlias(objName);
+              if (resolvedName === 'String' || objName === 'String') {
+                isFromCharCode = true;
+                calleeName = 'String.fromCharCode';
+              } else {
+                // Could be another object with fromCharCode, let's be optimistic
+                isFromCharCode = true;
+                calleeName = `${objName}.fromCharCode`;
+              }
+            }
+          }
+        }
+
+        if (!isFromCharCode) return;
+
+        // Handle spread argument in return statement
+        if (args.length === 1 && t.isSpreadElement(args[0])) {
+          const spreadArgument = args[0].argument;
+          let charCodes = null;
+          if (t.isIdentifier(spreadArgument)) {
+            // try declarator init
+            let arrNode = null;
+            const binding = path.scope.getBinding(spreadArgument.name);
+            if (binding && binding.path.isVariableDeclarator() && t.isArrayExpression(binding.path.node.init)) {
+              arrNode = binding.path.node.init;
+            } else if (binding) {
+              // fallback: search upwards for an assignment to the variable
+              path.findParent(p => {
+                if (p.isBlockStatement() || p.isProgram()) {
+                  for (const stmtPath of p.get('body')) {
+                    if (stmtPath.isExpressionStatement() && stmtPath.get('expression').isAssignmentExpression()) {
+                      const assignment = stmtPath.get('expression').node;
+                      if (
+                        t.isIdentifier(assignment.left, { name: spreadArgument.name }) &&
+                        t.isArrayExpression(assignment.right)
+                      ) {
+                        arrNode = assignment.right;
+                        return true; // stop searching
+                      }
+                    }
+                  }
+                }
+                return false; // continue searching upwards
+              });
+            }
+            if (arrNode) {
+              charCodes = arrNode.elements
+                .map(element => {
+                  if (t.isNumericLiteral(element)) {
+                    return element.value;
+                  }
+                  if (t.isStringLiteral(element)) {
+                    const num = parseInt(element.value, 10);
+                    if (!isNaN(num)) return num;
+                  }
+                  return null;
+                })
+                .filter(code => code !== null);
+            }
+          }
+
+          if (charCodes && charCodes.length > 0) {
+            try {
+              const key = String.fromCharCode(...charCodes);
+              const result = validateKey(key, calleeName, 'fromCharCode_return');
+
+              if (result.isValidKey) {
+                if (!foundKeys.some(fk => fk.key === key && fk.type === 'fromCharCode_return')) {
+                  foundKeys.push({ ...result });
+                }
+              } else if (result.isNonHex) {
+                nonHexCandidates.push({ result: key, source: calleeName, type: 'fromCharCode_return' });
+              } else if (result.isWrongLength) {
+                wrongLengthCandidates.push({
+                  result: key,
+                  source: calleeName,
+                  type: 'fromCharCode_return',
+                  length: result.actualLength,
+                  expectedLength: result.expectedLength
+                });
+              }
+            } catch (e) {
+              console.error(`Error processing fromCharCode in return:`, e);
+            }
+          }
         }
       }
     }
