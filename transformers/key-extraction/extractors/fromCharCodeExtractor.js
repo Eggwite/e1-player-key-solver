@@ -71,13 +71,11 @@ const createFromCharCodeExtractor = (foundKeys, nonHexCandidates, wrongLengthCan
       }
       const { callee, arguments: args } = path.node;
 
-      // Enhanced alias detection for fromCharCode
       let isFromCharCode = false;
       let calleeName = null;
 
       // Check if the callee is String.fromCharCode or an alias to it
       if (t.isMemberExpression(callee)) {
-        // enhanced alias detection for fromCharCode
         const isFromCharCodeProperty =
           (t.isIdentifier(callee.property) && callee.property.name === 'fromCharCode') ||
           (t.isStringLiteral(callee.property) && callee.property.value === 'fromCharCode') ||

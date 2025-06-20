@@ -172,7 +172,6 @@ export class ConcatenatedKeyExtractor {
   }
 
   /**
-   * Enhanced: Track object property assignments for use in key extraction
    * Call this from the main plugin to register object property assignments.
    */
   setObjectPropertiesMap(objectPropertiesMap) {
