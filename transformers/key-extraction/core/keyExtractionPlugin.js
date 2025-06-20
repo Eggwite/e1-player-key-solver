@@ -16,6 +16,7 @@ import { SegmentFunctionCollector } from '../collectors/segmentFunctionCollector
 import { ArrayJoinExtractor } from '../extractors/arrayJoinExtractor.js';
 import { FunctionKeyExtractor } from '../extractors/functionKeyExtractor.js';
 import createFromCharCodeExtractor from '../extractors/fromCharCodeExtractor.js';
+import createSliceExtractor from '../extractors/sliceExtractor.js';
 import { printResults, createExtractionSummary } from '../utils/extractionUtils.js';
 import { debug } from '../../centralDebug.js';
 
@@ -47,16 +48,35 @@ function logCollectionResults(segmentFunctionsMap, potentialKeyArrays) {
 
 // Helper to find a string literal initializer for a variable in the current or parent scope
 function findStringDeclarationValue(path, varName, t) {
-  if (!path) return null;
   const binding = path.scope.getBinding(varName);
   if (!binding) {
-    return findStringDeclarationValue(path.parentPath, varName, t);
+    return null;
   }
-  const node = binding.path.node;
-  if (t.isVariableDeclarator(node) && t.isStringLiteral(node.init)) {
-    return node.init.value;
+
+  let lastAssignedValue = null;
+  let lastAssignmentPath = null;
+
+  // Check the initial declaration
+  if (binding.path.isVariableDeclarator() && t.isStringLiteral(binding.path.node.init)) {
+    lastAssignedValue = binding.path.node.init.value;
+    lastAssignmentPath = binding.path;
   }
-  return null;
+
+  // Check all constant violations (assignments)
+  for (const assignmentPath of binding.constantViolations) {
+    // We only care about assignments that happen before the current path
+    if (assignmentPath.node.start < path.node.start) {
+      if (assignmentPath.isAssignmentExpression() && assignmentPath.get('right').isStringLiteral()) {
+        // If this is the first assignment we've seen, or it's later than the last one
+        if (!lastAssignmentPath || assignmentPath.node.start > lastAssignmentPath.node.start) {
+          lastAssignedValue = assignmentPath.get('right').node.value;
+          lastAssignmentPath = assignmentPath;
+        }
+      }
+    }
+  }
+
+  return lastAssignedValue;
 }
 
 // Helper to handle reversed string calls like: j.split('').reverse().join('')
@@ -541,6 +561,7 @@ export const findAndExtractKeyPlugin = api => {
           const functionKeyExtractor = new FunctionKeyExtractor(segmentFunctionsMap);
           const arrayJoinExtractor = new ArrayJoinExtractor(potentialKeyArrays);
           const fromCharCodeExtractor = createFromCharCodeExtractor(foundKeys, nonHexCandidates, wrongLengthCandidates);
+          const sliceExtractor = createSliceExtractor(foundKeys, nonHexCandidates, wrongLengthCandidates);
 
           // --- Configure Extractors ---
           functionKeyExtractor.setTypes(api.types);
@@ -565,7 +586,9 @@ export const findAndExtractKeyPlugin = api => {
               FIND_ALL_CANDIDATES
             ),
             // Visitor for fromCharCode patterns
-            ...fromCharCodeExtractor
+            ...fromCharCodeExtractor,
+            // Visitor for slice patterns
+            ...sliceExtractor
           });
         } else {
           debug.log(`Direct scan found ${foundKeys.length} keys, skipping standard extraction.`);
